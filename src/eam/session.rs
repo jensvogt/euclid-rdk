@@ -7,8 +7,11 @@ use serde_json::{json, Value};
 use super::model::*;
 use crate::credentials::{self, CachedCredentials};
 use crate::eag::Eag;
+use crate::eap::Eap;
+use crate::ees::Ees;
 use crate::ekm::Ekm;
 use crate::ekv::Ekv;
+use crate::emo::Emo;
 use crate::ens::Ens;
 use crate::eqs::Eqs;
 use crate::esm::Esm;
@@ -166,6 +169,24 @@ impl Session {
     /// ENS (pub/sub topic) operations for this session.
     pub fn ens(&self) -> Ens {
         Ens::new(self.service("ens"))
+    }
+
+    /// EAP (application platform) operations for this session. Every EAP action is
+    /// administrator-only server-side: a non-admin session gets 403 from all of them.
+    pub fn eap(&self) -> Eap {
+        Eap::new(self.service("eap"))
+    }
+
+    /// EES (event) operations for this session: subscribe a durable name to an event type with a
+    /// filter, then claim and acknowledge events - how an application watches ESM and the others.
+    pub fn ees(&self) -> Ees {
+        Ees::new(self.service("ees"))
+    }
+
+    /// EMO (monitoring) operations for this session, for pushing metrics a process has measured
+    /// about itself. Meant for ordinary principals - an application reporting its own load.
+    pub fn emo(&self) -> Emo {
+        Emo::new(self.service("emo"))
     }
 
     /// EKM (key management) operations for this session: encryption keys and certificates.
