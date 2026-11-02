@@ -1,7 +1,7 @@
 //! Thin wrapper around [`reqwest::Client`] that speaks euclid's request convention: every call is
 //! a `POST` naming the module in `x-euclid-target` and the operation in `x-euclid-action`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -31,6 +31,9 @@ impl Response {
 #[derive(Debug, Clone)]
 pub(crate) struct HttpClient {
     client: reqwest::Client,
+    /// The extra CA certificate this client trusts, kept so that other connections made on the
+    /// same session (the EES WebSocket stream) can trust the same one.
+    ca_cert_path: Option<PathBuf>,
 }
 
 impl HttpClient {
@@ -46,7 +49,14 @@ impl HttpClient {
         }
         Ok(Self {
             client: builder.build()?,
+            ca_cert_path: ca_cert_path.map(Path::to_path_buf),
         })
+    }
+
+    /// The extra CA certificate this client trusts, if any.
+    #[cfg_attr(not(feature = "ws"), allow(dead_code))]
+    pub fn ca_cert_path(&self) -> Option<&Path> {
+        self.ca_cert_path.as_deref()
     }
 
     /// POSTs `body` to `url` as `target`/`action`, with `headers` added on top. `timeout`
