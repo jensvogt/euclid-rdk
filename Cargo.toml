@@ -1,0 +1,44 @@
+[package]
+name = "euclid-rdk"
+version = "0.1.0"
+authors = ["Dr. Jens Vogt <jensvogt47@gmail.com>"]
+edition = "2021"
+rust-version = "1.88"
+description = "Rust client library for the Euclid APIs"
+license = "Apache-2.0"
+repository = "https://github.com/jensvogt/euclid-rdk"
+readme = "README.md"
+documentation = "https://docs.rs/euclid-rdk"
+homepage = "https://github.com/jensvogt/euclid-rdk"
+include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE", "CHANGELOG.md"]
+keywords = ["euclid", "sdk", "client"]
+categories = ["api-bindings", "web-programming::http-client"]
+
+[lib]
+name = "euclid_rdk"
+
+[features]
+default = ["native-tls"]
+# OpenSSL-backed TLS. Accepts a self-signed server certificate passed as the CA certificate, which
+# is how a development euclid deployment is usually reached.
+native-tls = ["reqwest/native-tls"]
+# Pure-Rust TLS. Note that rustls refuses a self-signed *leaf* certificate used as its own trust
+# anchor, so prefer native-tls against a development server.
+rustls-tls = ["reqwest/rustls-tls"]
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+base64 = "0.22"
+dirs = "5"
+sha2 = "0.10"
+hmac = "0.12"
+tokio = { version = "1", features = ["fs", "io-util", "time"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+tempfile = "3"
