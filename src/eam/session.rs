@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 
 use super::model::*;
 use crate::credentials::{self, CachedCredentials};
+use crate::ekv::Ekv;
+use crate::ens::Ens;
 use crate::eqs::Eqs;
 use crate::esm::Esm;
 use crate::http::HttpClient;
@@ -155,6 +157,16 @@ impl Session {
     /// EQS (queue) operations for this session.
     pub fn eqs(&self) -> Eqs {
         Eqs::new(self.service("eqs"))
+    }
+
+    /// ENS (pub/sub topic) operations for this session.
+    pub fn ens(&self) -> Ens {
+        Ens::new(self.service("ens"))
+    }
+
+    /// EKV (key-value store) operations for this session.
+    pub fn ekv(&self) -> Ekv {
+        Ekv::new(self.service("ekv"))
     }
 
     /// ESM (object storage) operations for this session.

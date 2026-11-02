@@ -9,8 +9,8 @@ counterpart of [euclid-jdk](https://github.com/jensvogt/euclid-jdk).
 
 Async, built on `reqwest`; use it from any Tokio runtime. Requires Rust 1.88+.
 
-Status: **EAM** (access management), **EQS** (queues) and **ESM** (object storage) are implemented.
-ENS and the other modules follow.
+Status: **EAM** (access management), **EQS** (queues), **ENS** (pub/sub topics), **ESM** (object
+storage) and **EKV** (key-value tables) are implemented. The remaining modules follow.
 
 ## Installation
 
@@ -103,7 +103,7 @@ let raw: serde_json::Value = session.invoke("eam", "some-action", &serde_json::j
 
 ### Authentication
 
-EAM calls carry the bearer token. EQS and ESM calls are SigV4-signed with the access key the login
+EAM calls carry the bearer token. All other module calls are SigV4-signed with the access key the login
 returned (falling back to the bearer token without one), exactly as euclid-cli and euclid-jdk sign
 them; a signed request answered `401 ... expired` is re-signed and sent once more. Object bytes
 (ESM uploads/downloads) always travel with the bearer token.
@@ -132,6 +132,29 @@ and trusts a zero only for 10 s (`zero_count_trust`). Also: `list_queues`, `get_
 `redrive_dlq`, tags, message attributes and `update_message_body`. Queue names resolve within the
 session's namespace; an ERN always works.
 
+### ENS topics
+
+```rust
+let ens = session.ens();                      // or Euclid::for_server(url).ens().await?
+
+let topic = ens.create_topic("orders").await?.ern.unwrap();
+ens.subscribe(&topic, &queue_ern).await?;     // fan out to an EQS queue ("SQS" protocol)
+
+let mut attributes = HashMap::new();
+attributes.insert("kind".to_owned(), Variant::string("order"));
+ens.publish_message_with(&PublishMessageRequest {
+    ern: topic.clone(), body: r#"{"orderId":"4711"}"#.into(), attributes, priority: "HIGH".into(),
+}).await?;
+```
+
+A topic is never consumed from: it fans each message out to its subscriptions at publish time and
+keeps a record for its retention period (`set_topic_retention`, `RETENTION_FOREVER`). The priority
+belongs to the fanned-out queue messages. `stop_topic` holds delivery without losing what arrives,
+and `start_topic` releases the backlog. Also: `list_messages`/`get_message`/`get_message_count`
+(read without consuming), message attributes, `update_message_body`, `resend_messages` (a replay,
+so subscribers must be idempotent), tags, `set_topic_max_message_length`, `purge_topic`, and
+`list_subscriptions`/`unsubscribe`.
+
 ### ESM object storage
 
 ```rust
@@ -158,6 +181,30 @@ multipart calls (`create_upload`, `upload_part`, `complete_upload`, `abort_uploa
 parts are retried on 5xx/connection errors; a part that fails for good aborts the upload. Byte
 transfers use a 120 s timeout (`with_transfer_timeout`), JSON calls 10 s.
 
+### EKV key-value tables
+
+```rust
+use euclid_rdk::ekv::*;
+use serde_json::json;
+
+let ekv = session.ekv();                      // or Euclid::for_server(url).ekv().await?
+ekv.create_table("orders", "customer", Some("order")).await?;
+
+ekv.put_item("orders", &json!({ "customer": "alice", "order": "2026-11-01", "amount": 10 })).await?;
+let item = ekv.get_item("orders", &json!({ "customer": "alice", "order": "2026-11-01" })).await?;
+println!("{:?} (created {:?})", item.get("amount"), item.created);
+
+let recent = ekv.query_where("orders", "alice", SortOperator::Ge, "2026-11-01").await?;
+let page = ekv.scan("orders", 100, 0).await?;           // page size 0 = everything
+```
+
+Items and keys are plain JSON objects, so a `json!` value or any `Serialize` struct works. The
+server's `_created`/`_modified` attributes come back as `Item::created`/`Item::modified`. Key types
+default to `string`; `create_table_with(&CreateTableRequest { .. })` sets `KeyType::Number` or
+`KeyType::Binary`. `query_with(&QueryRequest { .. })` adds `SortOperator::Between` (with
+`sort_upper`), descending order (`forward: false`) and paging. Also: `list_tables`, `get_table`,
+`exists_table`, `delete_item` and `delete_table`. A missing item is a 404 `Error::Service`.
+
 ### Errors
 
 Every call returns `euclid_rdk::Result<T>`. `Error::Authentication` is a rejected login,
@@ -169,7 +216,9 @@ the HTTP status either way.
 ```sh
 EUCLID_URL=https://localhost:5566 EUCLID_USER=jens EUCLID_PASSWORD=secret cargo run --example login
 EUCLID_URL=https://localhost:5566 cargo run --example eqs [-- <queue>]   # read-only
+EUCLID_URL=https://localhost:5566 cargo run --example ens                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example esm                # read-only
+EUCLID_URL=https://localhost:5566 cargo run --example ekv [-- <table>]   # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example invoke -- eqs list-queues '{"pageSize":3}'
 ```
 
@@ -177,12 +226,13 @@ All but `login` use the cached session.
 
 ## Live tests
 
-`tests/live.rs` runs EQS and ESM round trips against a real server: it creates a uniquely named
-queue and bucket, sends/receives/deletes messages, uploads and downloads a 12 MiB multipart file,
-and deletes both again, also when a check fails. Ignored by default:
+`tests/live*.rs` run round trips against a real server: EQS send/receive/delete, ESM objects and
+a 12 MiB multipart transfer, ENS publish fanned out to a subscribed queue, and EKV put/get/query/
+scan. Each creates uniquely named `rdk-live-*` resources and deletes them again, also when a check
+fails. Ignored by default:
 
 ```sh
-EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live -- --ignored --nocapture
+EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live --test live_ens --test live_ekv -- --ignored --nocapture
 ```
 
 ## TLS

@@ -24,6 +24,8 @@
 pub mod auth;
 pub mod credentials;
 pub mod eam;
+pub mod ekv;
+pub mod ens;
 pub mod eqs;
 mod error;
 pub mod esm;
@@ -33,6 +35,8 @@ mod service;
 mod variant;
 
 pub use eam::{Eam, Session};
+pub use ekv::Ekv;
+pub use ens::Ens;
 pub use eqs::Eqs;
 pub use error::{Error, Result};
 pub use esm::Esm;
@@ -70,6 +74,16 @@ impl Euclid {
     /// EQS operations using the cached session for this server (see [`Euclid::session`]).
     pub async fn eqs(&self) -> Result<Eqs> {
         Ok(self.session().await?.eqs())
+    }
+
+    /// ENS operations using the cached session for this server (see [`Euclid::session`]).
+    pub async fn ens(&self) -> Result<Ens> {
+        Ok(self.session().await?.ens())
+    }
+
+    /// EKV operations using the cached session for this server (see [`Euclid::session`]).
+    pub async fn ekv(&self) -> Result<Ekv> {
+        Ok(self.session().await?.ekv())
     }
 
     /// ESM operations using the cached session for this server (see [`Euclid::session`]).
