@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/jensvogt/euclid-rdk/compare/euclid-rdk-v0.1.2...euclid-rdk-v0.1.3) (2026-11-02)
+
+
+### Bug Fixes
+
+* complete EAP (missing egress limiter) and add the EMO metrics recorder ([94c5c86](https://github.com/jensvogt/euclid-rdk/commit/94c5c86f60c5e9345df3d1f3f2ab8120f36df7e4))
+
 ## [0.1.2](https://github.com/jensvogt/euclid-rdk/compare/euclid-rdk-v0.1.1...euclid-rdk-v0.1.2) (2026-11-02)
 
 
