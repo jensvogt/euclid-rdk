@@ -10,8 +10,8 @@ counterpart of [euclid-jdk](https://github.com/jensvogt/euclid-jdk).
 Async, built on `reqwest`; use it from any Tokio runtime. Requires Rust 1.88+.
 
 Status: **EAM** (access management), **EQS** (queues), **ENS** (pub/sub topics), **ESM** (object
-storage), **EKV** (key-value tables), **ESS** (secrets), **ETS** (transfer servers) and **EAG** (API
-gateway) are implemented. EAP, EES, EKM and EMO follow.
+storage), **EKV** (key-value tables), **ESS** (secrets), **EKM** (keys and certificates), **ETS**
+(transfer servers) and **EAG** (API gateway) are implemented. EAP, EES and EMO follow.
 
 ## Installation
 
@@ -227,6 +227,31 @@ description, `None` leaves it alone. Listings never carry values, and `Debug` ou
 holding a value prints `<redacted>`. Also: `list_secrets`, `exists_secret`, `delete_secret` and
 `add_secret_tag`/`delete_secret_tag`.
 
+### EKM keys and certificates
+
+```rust
+use euclid_rdk::ekm::*;
+
+let ekm = session.ekm();                      // or Euclid::for_server(url).ekm().await?
+
+let key = ekm.create_key_with(&CreateKeyRequest { length: 256, description: "orders".into(), ..Default::default() }).await?;
+let id = key.name.unwrap();                   // the server names keys (a UUID)
+let cipher = ekm.encrypt(&id, b"hello").await?;
+let plain = ekm.decrypt(&id, cipher.expose()).await?;
+
+let cert = ekm.create_certificate("internal-tls").await?;   // self-signed, 825 days, 2048 bit
+```
+
+Key material never leaves EKM: data is encrypted and decrypted by sending it there, and results
+come back as `Sensitive` (`Debug` prints only the length). `encrypt`, `decrypt` and `delete_key`
+take the key's id (its name); `get_key`, `revoke_key`, `set_key_description` and the tag calls take
+its ERN. `delete_key` only schedules deletion: the key stays `PENDING_DELETION` for the window
+(default 7 days, at least 1, see `delete_key_after`). Certificates are generated self-signed
+(`create_certificate_with` for CN, SANs, validity, key size) or imported with their private key
+(`import_certificate`, redacted in `Debug`); only the public PEM comes back. Also: `list_keys`,
+`exists_key`, `add_key_tag`/`delete_key_tag`, `list_certificates`, `get_certificate`,
+`delete_certificate`.
+
 ### ETS transfer servers
 
 ```rust
@@ -285,6 +310,7 @@ EUCLID_URL=https://localhost:5566 cargo run --example ens                # read-
 EUCLID_URL=https://localhost:5566 cargo run --example esm                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example ekv [-- <table>]   # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example ess                # read-only, never prints values
+EUCLID_URL=https://localhost:5566 cargo run --example ekm                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example ets [-- <id>]      # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example eag                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example invoke -- eqs list-queues '{"pageSize":3}'
@@ -296,11 +322,12 @@ All but `login` use the cached session.
 
 `tests/live*.rs` run round trips against a real server: EQS send/receive/delete, ESM objects and
 a 12 MiB multipart transfer, ENS publish fanned out to a subscribed queue, EKV put/get/query/scan,
-and an ESS secret lifecycle. Each creates uniquely named `rdk-live-*` resources and deletes them again, also when a check
-fails. Ignored by default:
+an ESS secret lifecycle, and EKM keys (encrypt/decrypt) and certificates. Each creates uniquely named `rdk-live-*` resources and deletes them again, also when a check
+fails - except EKM keys, whose deletion the server only schedules (the
+live test uses a 1-day window). Ignored by default:
 
 ```sh
-EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live --test live_ens --test live_ekv --test live_ess -- --ignored --nocapture
+EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live --test live_ens --test live_ekv --test live_ess --test live_ekm -- --ignored --nocapture
 ```
 
 ## TLS

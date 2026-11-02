@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use super::model::*;
 use crate::credentials::{self, CachedCredentials};
 use crate::eag::Eag;
+use crate::ekm::Ekm;
 use crate::ekv::Ekv;
 use crate::ens::Ens;
 use crate::eqs::Eqs;
@@ -165,6 +166,11 @@ impl Session {
     /// ENS (pub/sub topic) operations for this session.
     pub fn ens(&self) -> Ens {
         Ens::new(self.service("ens"))
+    }
+
+    /// EKM (key management) operations for this session: encryption keys and certificates.
+    pub fn ekm(&self) -> Ekm {
+        Ekm::new(self.service("ekm"))
     }
 
     /// EKV (key-value store) operations for this session.
