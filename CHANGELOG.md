@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.2](https://github.com/jensvogt/euclid-rdk/compare/euclid-rdk-v0.1.1...euclid-rdk-v0.1.2) (2026-11-02)
+
+
+### Features
+
+* add all other modules ([b3196fa](https://github.com/jensvogt/euclid-rdk/commit/b3196fa199e17d5a77447d123f0666a02c01f4c6))
+* EKM module ([733b1d4](https://github.com/jensvogt/euclid-rdk/commit/733b1d4ac3b527c13fafb070423ad9dd87e6ffad))
+* ESS, EKM, ETS and EAG modules ([d745e8e](https://github.com/jensvogt/euclid-rdk/commit/d745e8e8cb2437c0f7816ef6debe104152be21fb))
+* ESS, ETS and EAG modules ([0e413d2](https://github.com/jensvogt/euclid-rdk/commit/0e413d2745705bd10d961d6b2cc04e11eebef374))
+
 ## [0.1.1](https://github.com/jensvogt/euclid-rdk/compare/euclid-rdk-v0.1.0...euclid-rdk-v0.1.1) (2026-11-02)
 
 
