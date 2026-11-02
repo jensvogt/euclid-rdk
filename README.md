@@ -11,8 +11,8 @@ Async, built on `reqwest`; use it from any Tokio runtime. Requires Rust 1.88+.
 
 Status: **EAM** (access management), **EQS** (queues), **ENS** (pub/sub topics), **ESM** (object
 storage), **EKV** (key-value tables), **ESS** (secrets), **EKM** (keys and certificates), **ETS**
-(transfer servers), **EAG** (API gateway), **EAP** (application platform) and **EMO** (metrics) are
-implemented. EES follows.
+(transfer servers), **EAG** (API gateway), **EAP** (application platform), **EMO** (metrics) and
+**EES** (events, incl. a WebSocket stream) are implemented - every module euclid-jdk has.
 
 ## Installation
 
@@ -347,6 +347,38 @@ published as `.count`/`.total` (rates) and `.max` (gauge), which survive EMO's r
 described as seconds are published in milliseconds. A failed scheduled push is logged (`log`) and
 dropped rather than retried.
 
+### EES events
+
+```rust
+use euclid_rdk::ees::{self, SubscribeEventsRequest, ESM_OBJECT_CREATED};
+
+let ees = session.ees();                      // or Euclid::for_server(url).ees().await?
+ees.subscribe_events_with(&SubscribeEventsRequest {
+    name: "invoice-import".into(),
+    event_types: vec![ESM_OBJECT_CREATED.into()],
+    filter: ees::filter([("bucketName", "inbox")]),
+    ..Default::default()                      // durable
+}).await?;
+
+let claimed = ees.receive_events_with("invoice-import", 10, 20, 300).await?;  // long poll <= 20 s
+for event in &claimed.events {
+    println!("{:?}", event.esm_object().and_then(|o| o.key));
+}
+let ids: Vec<_> = claimed.events.iter().filter_map(|e| e.event_id.clone()).collect();
+ees.ack_events("invoice-import", &ids).await?;
+```
+
+A subscriber is a durable *name*: instances sharing it split the events between them, and
+different names each get their own copy. The filter is applied where events are published, so a
+subscriber only accumulates what it asked for. An event that is claimed but never acknowledged
+comes back after its visibility timeout.
+
+With the `ws` feature, `ees.event_stream()` opens the gateway's WebSocket, and `EventListener`
+(`builder().ees(..).stream(..).name(..).handler(..)`) is told when something is waiting, claims
+it, runs your async handler and acknowledges only what was handled; `DeliveryMode::Live` hands
+pushed events straight to the handler. The stream reconnects with backoff and registers its
+subscriptions again.
+
 ### Errors
 
 Every call returns `euclid_rdk::Result<T>`. `Error::Authentication` is a rejected login,
@@ -366,6 +398,7 @@ EUCLID_URL=https://localhost:5566 cargo run --example ekm                # read-
 EUCLID_URL=https://localhost:5566 cargo run --example ets [-- <id>]      # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example eag                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example eap                # read-only
+EUCLID_URL=https://localhost:5566 cargo run --example ees                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example invoke -- eqs list-queues '{"pageSize":3}'
 ```
 
@@ -375,12 +408,13 @@ All but `login` use the cached session.
 
 `tests/live*.rs` run round trips against a real server: EQS send/receive/delete, ESM objects and
 a 12 MiB multipart transfer, ENS publish fanned out to a subscribed queue, EKV put/get/query/scan,
-an ESS secret lifecycle, and EKM keys (encrypt/decrypt) and certificates. Each creates uniquely named `rdk-live-*` resources and deletes them again, also when a check
+an ESS secret lifecycle, EKM keys (encrypt/decrypt) and certificates, and EES events
+(HTTP claim/ack and, with `--features ws`, the WebSocket stream). Each creates uniquely named `rdk-live-*` resources and deletes them again, also when a check
 fails - except EKM keys, whose deletion the server only schedules (the
 live test uses a 1-day window). Ignored by default:
 
 ```sh
-EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live --test live_ens --test live_ekv --test live_ess --test live_ekm -- --ignored --nocapture
+EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live --test live_ens --test live_ekv --test live_ess --test live_ekm --test live_ees --features ws -- --ignored --nocapture
 ```
 
 ## TLS
