@@ -25,6 +25,8 @@ native-tls = ["reqwest/native-tls"]
 # Pure-Rust TLS. Note that rustls refuses a self-signed *leaf* certificate used as its own trust
 # anchor, so prefer native-tls against a development server.
 rustls-tls = ["reqwest/rustls-tls"]
+# A `metrics` crate recorder that pushes what an application measures to EMO every step.
+metrics = ["dep:metrics", "dep:log", "tokio/rt", "tokio/sync"]
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "http2"] }
@@ -37,8 +39,13 @@ sha2 = "0.10"
 hmac = "0.12"
 tokio = { version = "1", features = ["fs", "io-util", "time"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+metrics = { version = "0.24", optional = true }
+log = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 tempfile = "3"
+
+[package.metadata.docs.rs]
+all-features = true

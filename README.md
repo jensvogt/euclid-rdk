@@ -11,7 +11,8 @@ Async, built on `reqwest`; use it from any Tokio runtime. Requires Rust 1.88+.
 
 Status: **EAM** (access management), **EQS** (queues), **ENS** (pub/sub topics), **ESM** (object
 storage), **EKV** (key-value tables), **ESS** (secrets), **EKM** (keys and certificates), **ETS**
-(transfer servers) and **EAG** (API gateway) are implemented. EAP, EES and EMO follow.
+(transfer servers), **EAG** (API gateway), **EAP** (application platform) and **EMO** (metrics) are
+implemented. EES follows.
 
 ## Installation
 
@@ -295,6 +296,57 @@ fields given, and the same struct with `create_route_with` sets methods, namespa
 `list_listeners` reports what is configured and, through `serving`, whether anything is bound.
 Also: `get_route`, `delete_route`.
 
+### EAP applications
+
+```rust
+use euclid_rdk::eap::*;
+
+let eap = session.eap();                      // administrator-only: others get 403
+eap.create_application(&CreateApplicationRequest {
+    application_id: Some("billing".into()), runtime: Some("java25".into()),
+    bucket: Some("apps".into()), artifact: Some("billing-1.2.0.jar".into()),
+    queues: Some(vec!["orders".into()]), ..Default::default()
+}).await?;                                    // created stopped
+eap.start_application("billing").await?;      // records intent; `state` follows
+let nodes = eap.list_nodes().await?;
+```
+
+An application is an artifact in an ESM bucket that euclid runs as a pool of processes. Every
+name is resolved at deployment (404 for a missing bucket, artifact or resource, 409 for a taken
+id). `update_application` changes only the fields that are `Some`. Also: `copy_application`
+(promote to another namespace), `scale_application`, `redeploy_application`,
+`restart_application`/`rebalance_application`, log levels, infrastructure and platform
+declarations (`plan_*` changes nothing), and nodes. Environment values print as `<redacted>` in
+`Debug`. `EgressLimiter` makes an application's calls to outside sites wait for a permit from
+EAP, shared by all its instances - `limiter.run("api.example.com", fetch()).await?` - timing out
+with an `EgressTimeout`, and falling back to local pacing if EAP cannot be asked.
+
+### EMO metrics
+
+```rust
+use euclid_rdk::emo::*;
+
+let emo = session.emo();                      // ordinary principals may push their own load
+emo.push_metrics("parser-dev", &[
+    Metric::labelled("application-utilisation", "instance", "i-1", 42.5, MetricType::Gauge),
+]).await?;
+```
+
+With the `metrics` feature, anything recorded through the [`metrics`](https://docs.rs/metrics)
+macros is accumulated per step and pushed for you:
+
+```rust
+let handle = session.emo().recorder("parser-dev").step(Duration::from_secs(60)).install()?;
+metrics::counter!("messages", "queue" => "orders").increment(1);   // rate per step
+metrics::histogram!("request.latency").record(elapsed);             // .count/.total/.max
+handle.shutdown().await?;                                           // pushes the partial step
+```
+
+Counters become `rate`s carrying the step's count, gauges keep their level, and histograms are
+published as `.count`/`.total` (rates) and `.max` (gauge), which survive EMO's rollups. Time units
+described as seconds are published in milliseconds. A failed scheduled push is logged (`log`) and
+dropped rather than retried.
+
 ### Errors
 
 Every call returns `euclid_rdk::Result<T>`. `Error::Authentication` is a rejected login,
@@ -313,6 +365,7 @@ EUCLID_URL=https://localhost:5566 cargo run --example ess                # read-
 EUCLID_URL=https://localhost:5566 cargo run --example ekm                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example ets [-- <id>]      # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example eag                # read-only
+EUCLID_URL=https://localhost:5566 cargo run --example eap                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example invoke -- eqs list-queues '{"pageSize":3}'
 ```
 
