@@ -21,12 +21,28 @@ name = "euclid_rdk"
 default = ["native-tls"]
 # OpenSSL-backed TLS. Accepts a self-signed server certificate passed as the CA certificate, which
 # is how a development euclid deployment is usually reached.
-native-tls = ["reqwest/native-tls"]
+native-tls = ["reqwest/native-tls", "dep:native-tls", "tokio-tungstenite?/native-tls"]
 # Pure-Rust TLS. Note that rustls refuses a self-signed *leaf* certificate used as its own trust
 # anchor, so prefer native-tls against a development server.
-rustls-tls = ["reqwest/rustls-tls"]
+rustls-tls = [
+    "reqwest/rustls-tls",
+    "dep:rustls",
+    "dep:rustls-pki-types",
+    "dep:webpki-roots",
+    "tokio-tungstenite?/__rustls-tls",
+]
 # A `metrics` crate recorder that pushes what an application measures to EMO every step.
 metrics = ["dep:metrics", "dep:log", "tokio/rt", "tokio/sync"]
+# The EES WebSocket event stream (`ees::EventStream`, `ees::EventListener`): pushed events instead of
+# polling. Uses the TLS backend chosen above.
+ws = [
+    "dep:tokio-tungstenite",
+    "futures-util/sink",
+    "tokio/net",
+    "tokio/sync",
+    "tokio/rt",
+    "tokio/macros",
+]
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "http2"] }
@@ -41,6 +57,11 @@ tokio = { version = "1", features = ["fs", "io-util", "time"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 metrics = { version = "0.24", optional = true }
 log = { version = "0.4", optional = true }
+tokio-tungstenite = { version = "0.30", optional = true, default-features = false, features = ["connect", "handshake"] }
+native-tls = { version = "0.2", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+rustls-pki-types = { version = "1", optional = true, features = ["std"] }
+webpki-roots = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
