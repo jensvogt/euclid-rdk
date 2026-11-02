@@ -10,7 +10,8 @@ counterpart of [euclid-jdk](https://github.com/jensvogt/euclid-jdk).
 Async, built on `reqwest`; use it from any Tokio runtime. Requires Rust 1.88+.
 
 Status: **EAM** (access management), **EQS** (queues), **ENS** (pub/sub topics), **ESM** (object
-storage) and **EKV** (key-value tables) are implemented. The remaining modules follow.
+storage), **EKV** (key-value tables), **ESS** (secrets), **ETS** (transfer servers) and **EAG** (API
+gateway) are implemented. EAP, EES, EKM and EMO follow.
 
 ## Installation
 
@@ -205,6 +206,70 @@ default to `string`; `create_table_with(&CreateTableRequest { .. })` sets `KeyTy
 `sort_upper`), descending order (`forward: false`) and paging. Also: `list_tables`, `get_table`,
 `exists_table`, `delete_item` and `delete_table`. A missing item is a 404 `Error::Service`.
 
+### ESS secrets
+
+```rust
+let ess = session.ess();                      // or Euclid::for_server(url).ess().await?
+
+ess.create_secret("db-password", "s3cr3t").await?;      // 409 if the name is taken
+let secret = ess.get_secret("db-password").await?;      // the only call that decrypts
+let value = secret.value.unwrap_or_default();
+
+ess.rotate_secret("db-password", "n3w").await?;         // bumps `version`
+ess.update_secret(&UpdateSecretRequest {
+    name: "db-password".into(), description: Some("prod database".into()), ..Default::default()
+}).await?;
+```
+
+Secrets are encrypted under the namespace's EKM key unless `create_secret_with` names another
+(`key_ern`). In `update_secret` only the fields that are `Some` change; `Some("")` clears a
+description, `None` leaves it alone. Listings never carry values, and `Debug` output of anything
+holding a value prints `<redacted>`. Also: `list_secrets`, `exists_secret`, `delete_secret` and
+`add_secret_tag`/`delete_secret_tag`.
+
+### ETS transfer servers
+
+```rust
+use euclid_rdk::ets::*;
+
+let ets = session.ets();                      // administrator-only: others get 403
+let server = ets.create_server(&CreateServerRequest {
+    server_id: "inbound".into(),
+    port: Some(2222),
+    bucket: Some("uploads".into()),
+    home_directory: Some("{user}".into()),    // every client gets its own key prefix
+    user_groups: Some(vec!["partners".into()]),
+    ..Default::default()                      // SFTP on 0.0.0.0
+}).await?;
+ets.start_server("inbound").await?;           // records intent; `state` follows shortly
+```
+
+A transfer server is an FTP or SFTP listener in front of an ESM bucket: clients log in with their
+EAM credentials and every upload becomes an object. It is created stopped; `start_server` and
+`stop_server` set `desired_state`, and the server's reconciler brings `state` in line.
+`update_server` sends only the fields that are set. Also: `list_servers`, `get_server`,
+`delete_server`. An unknown bucket is a 404, a port already in use a 409.
+
+### EAG API gateway
+
+```rust
+use euclid_rdk::eag::*;
+
+let eag = session.eag();                      // administrator-only: others get 403
+eag.create_route("produkte", "/api/produkte", "my-app").await?;
+eag.create_module_route("login", "/api/login", "eam", "login").await?;   // one origin, no CORS
+eag.set_route_active("produkte", false).await?;                          // stop exposing it, keep it
+
+let listeners = eag.list_listeners().await?;
+```
+
+The API gateway publishes plain HTTP paths to the outside world and forwards them to an
+application or to one euclid module action. `update_route(&RouteRequest { .. })` changes only the
+fields given, and the same struct with `create_route_with` sets methods, namespace,
+`RouteAuthentication` and `active`. `list_routes(prefix)` covers the session's namespace;
+`list_listeners` reports what is configured and, through `serving`, whether anything is bound.
+Also: `get_route`, `delete_route`.
+
 ### Errors
 
 Every call returns `euclid_rdk::Result<T>`. `Error::Authentication` is a rejected login,
@@ -219,6 +284,9 @@ EUCLID_URL=https://localhost:5566 cargo run --example eqs [-- <queue>]   # read-
 EUCLID_URL=https://localhost:5566 cargo run --example ens                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example esm                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example ekv [-- <table>]   # read-only
+EUCLID_URL=https://localhost:5566 cargo run --example ess                # read-only, never prints values
+EUCLID_URL=https://localhost:5566 cargo run --example ets [-- <id>]      # read-only
+EUCLID_URL=https://localhost:5566 cargo run --example eag                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example invoke -- eqs list-queues '{"pageSize":3}'
 ```
 
@@ -227,12 +295,12 @@ All but `login` use the cached session.
 ## Live tests
 
 `tests/live*.rs` run round trips against a real server: EQS send/receive/delete, ESM objects and
-a 12 MiB multipart transfer, ENS publish fanned out to a subscribed queue, and EKV put/get/query/
-scan. Each creates uniquely named `rdk-live-*` resources and deletes them again, also when a check
+a 12 MiB multipart transfer, ENS publish fanned out to a subscribed queue, EKV put/get/query/scan,
+and an ESS secret lifecycle. Each creates uniquely named `rdk-live-*` resources and deletes them again, also when a check
 fails. Ignored by default:
 
 ```sh
-EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live --test live_ens --test live_ekv -- --ignored --nocapture
+EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live --test live_ens --test live_ekv --test live_ess -- --ignored --nocapture
 ```
 
 ## TLS

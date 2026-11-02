@@ -6,10 +6,13 @@ use serde_json::{json, Value};
 
 use super::model::*;
 use crate::credentials::{self, CachedCredentials};
+use crate::eag::Eag;
 use crate::ekv::Ekv;
 use crate::ens::Ens;
 use crate::eqs::Eqs;
 use crate::esm::Esm;
+use crate::ess::Ess;
+use crate::ets::Ets;
 use crate::http::HttpClient;
 use crate::service::{Identity, ServiceClient};
 use crate::{Error, Result};
@@ -167,6 +170,23 @@ impl Session {
     /// EKV (key-value store) operations for this session.
     pub fn ekv(&self) -> Ekv {
         Ekv::new(self.service("ekv"))
+    }
+
+    /// ESS (secrets) operations for this session.
+    pub fn ess(&self) -> Ess {
+        Ess::new(self.service("ess"))
+    }
+
+    /// ETS (transfer server) operations for this session. Every ETS action is administrator-only
+    /// server-side: a non-admin session gets 403 from all of them.
+    pub fn ets(&self) -> Ets {
+        Ets::new(self.service("ets"))
+    }
+
+    /// EAG (API gateway) operations for this session: the routes the gateway publishes and the
+    /// listeners it publishes them on. Administrator-only server-side, like ETS.
+    pub fn eag(&self) -> Eag {
+        Eag::new(self.service("eag"))
     }
 
     /// ESM (object storage) operations for this session.
