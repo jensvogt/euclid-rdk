@@ -46,6 +46,7 @@ pub struct Eam {
     email: Option<String>,
     password: Option<String>,
     ca_cert_path: Option<PathBuf>,
+    account: Option<String>,
     namespace: Option<String>,
     cache: CachePolicy,
 }
@@ -67,6 +68,7 @@ impl std::fmt::Debug for Eam {
             .field("email", &self.email)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("ca_cert_path", &self.ca_cert_path)
+            .field("account", &self.account)
             .field("namespace", &self.namespace)
             .field("cache", &self.cache)
             .finish()
@@ -84,6 +86,7 @@ impl Eam {
             email: None,
             password: None,
             ca_cert_path: default_ca_cert(),
+            account: None,
             namespace: None,
             cache: CachePolicy::Default,
         }
@@ -135,6 +138,16 @@ impl Eam {
         self
     }
 
+    /// Account to work in instead of the user's home account, by account id or by name - mirroring
+    /// `euclid-cli eam login --account`. Checked against
+    /// [`Session::list_my_accounts`] right after login (see [`Session::switch_account`]) and
+    /// applied before [`namespace`](Self::namespace), which is then looked for in this account.
+    /// Applies whether login reuses a cached session or performs a fresh one.
+    pub fn account(mut self, account: impl Into<String>) -> Self {
+        self.account = Some(account.into()).filter(|a: &String| !a.is_empty());
+        self
+    }
+
     /// Namespace to make active once login succeeds - applied with a follow-up `change-namespace`,
     /// mirroring `euclid-cli eam login --namespace`. Applies whether login reuses a cached session
     /// or performs a fresh one.
@@ -166,19 +179,26 @@ impl Eam {
     /// Authenticates and returns a session.
     ///
     /// If the credentials cache holds a still-valid token for this server, that session is
-    /// reused without contacting the server (other than to switch namespace, if one was asked for
-    /// and differs). Otherwise the configured credentials are sent and the resulting session is
+    /// reused without contacting the server (other than to switch account or namespace, if one was
+    /// asked for and differs). Otherwise the configured credentials are sent and the resulting session is
     /// cached.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] if nothing is cached and no username/email or password was set,
-    /// [`Error::Authentication`] if the server rejects the login.
+    /// [`Error::Authentication`] if the server rejects the login, [`Error::InvalidArgument`] if an
+    /// [`account`](Self::account) was asked for that is not one of the user's - the login itself
+    /// still stands and is cached, in the home account, as `euclid-cli` does.
     pub async fn login(&self) -> Result<Session> {
         let cache_path = self.cache_path();
         let http = HttpClient::new(self.ca_cert_path.as_deref())?;
 
         if let Some(mut cached) = cache_path.as_deref().and_then(|p| self.cached_session(p, &http)) {
+            if let Some(account) = &self.account {
+                if cached.account_id() != Some(account.as_str()) {
+                    cached.switch_account(account).await?;
+                }
+            }
             if let Some(ns) = &self.namespace {
                 if cached.namespace() != Some(ns.as_str()) {
                     cached.change_namespace(ns).await?;
@@ -237,6 +257,18 @@ impl Eam {
                 namespace: None,
             },
         );
+        // The account before the namespace: a namespace belongs to an account, and the one
+        // change-namespace checks it against is whichever the request carries.
+        if let Some(account) = &self.account {
+            if let Err(err) = session.switch_account(account).await {
+                // The credentials were right, so the session is kept - in the home account - and
+                // the next attempt need not send the password again for a typo in an account name.
+                if let Some(path) = &cache_path {
+                    credentials::store(path, &session.to_cached())?;
+                }
+                return Err(err);
+            }
+        }
         if let Some(ns) = &self.namespace {
             session.change_namespace(ns).await?;
         }
