@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use euclid_rdk::esm::{Attributes, ListBucketsRequest, TransferOptions, Variant};
+use euclid_rdk::esm::{Attributes, LifecycleRule, ListBucketsRequest, TransferOptions, Variant};
 use euclid_rdk::{Eam, Error, Esm};
 use serde_json::{json, Value};
 use wiremock::matchers::{body_bytes, body_json, header, header_exists, method};
@@ -483,4 +483,298 @@ async fn attributes_and_subscriptions_round_trip() {
             .unwrap();
     assert_eq!(event.size, 12);
     assert_eq!(event.event_type.as_deref(), Some("OBJECT_CREATED"));
+}
+
+#[tokio::test]
+async fn bucket_versioning_sends_only_what_is_set() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "set-bucket-versioning"))
+        .and(body_json(json!({ "ern": BUCKET, "enabled": true })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ern": BUCKET, "name": "b", "versioning": true, "maxVersions": 0
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "set-bucket-versioning"))
+        .and(body_json(json!({ "ern": BUCKET, "maxVersions": 5 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ern": BUCKET, "name": "b", "versioning": true, "maxVersions": 5
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "get-bucket"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "bucket": { "ern": BUCKET, "name": "b", "versioning": true, "maxVersions": 5 }
+        })))
+        .mount(&server)
+        .await;
+
+    let on = esm.set_bucket_versioning(BUCKET, Some(true), None).await.unwrap();
+    assert!(on.versioning);
+    assert_eq!(on.max_versions, 0);
+    let limited = esm.set_bucket_versioning(BUCKET, None, Some(5)).await.unwrap();
+    assert_eq!(limited.max_versions, 5);
+    let bucket = esm.get_bucket(BUCKET).await.unwrap();
+    assert!(bucket.versioning);
+    assert_eq!(bucket.max_versions, 5);
+}
+
+#[tokio::test]
+async fn object_versions_list_delete_and_download() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    let object = format!("{BUCKET}/k");
+    Mock::given(header("x-euclid-action", "list-object-versions"))
+        .and(body_json(json!({ "bucketErn": BUCKET, "key": "k" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "bucketErn": BUCKET, "key": "k", "ern": object, "versioning": true, "maxVersions": 3,
+            "versions": [
+                { "versionId": "v2", "latest": true, "size": 4, "md5Sum": "m2", "contentType": "text/plain",
+                  "status": "COMPLETED", "lifecycleState": "STANDARD", "owner": "jvo",
+                  "modified": "2026-11-06T10:00:00Z" },
+                { "versionId": "v1", "latest": false, "size": 3, "status": "COMPLETED",
+                  "lifecycleState": "ARCHIVED" }
+            ],
+            "total": 2
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "delete-object"))
+        .and(body_json(json!({ "ern": object, "versionId": "v1" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ern": object, "versionId": "v1", "currentVersionId": "v2"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "delete-object"))
+        .and(body_json(json!({ "ern": object, "versionId": "v2" })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "get-object"))
+        .and(header("x-euclid-version-id", "v1"))
+        .respond_with(ResponseTemplate::new(413).set_body_string("too large"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "create-download"))
+        .and(body_json(json!({ "bucketErn": BUCKET, "key": "k", "versionId": "v1" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "downloadId": "d1", "size": 3 })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "download-part"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"old".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "complete-download"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let listed = esm.list_object_versions(BUCKET, "k").await.unwrap();
+    assert_eq!((listed.total, listed.max_versions), (2, 3));
+    assert!(listed.versions[0].latest);
+    assert_eq!(listed.versions[1].version_id.as_deref(), Some("v1"));
+    assert_eq!(listed.versions[1].lifecycle_state.as_deref(), Some("ARCHIVED"));
+
+    let deleted = esm.delete_object_version(&object, "v1").await.unwrap();
+    assert_eq!(deleted.current_version_id.as_deref(), Some("v2"));
+    // The last version left goes with the object, which answers with no body.
+    let last = esm.delete_object_version(&object, "v2").await.unwrap();
+    assert_eq!(
+        (last.version_id.as_deref(), last.current_version_id),
+        (Some("v2"), None)
+    );
+    assert!(matches!(
+        esm.delete_object_version(&object, "").await,
+        Err(Error::InvalidArgument(_))
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("k");
+    let options = TransferOptions {
+        part_size: 10,
+        version_id: Some("v1".into()),
+        ..Default::default()
+    };
+    assert_eq!(esm.download_file(BUCKET, "k", &file, &options).await.unwrap(), 3);
+    assert_eq!(std::fs::read(&file).unwrap(), b"old");
+}
+
+#[tokio::test]
+async fn versioned_upload_and_object_fields_parse() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "put-object"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ern": "e", "bucketErn": BUCKET, "key": "k", "size": 4, "status": "UPLOADED",
+            "versionId": "v3", "unchanged": true
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "list-objects"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "objects": [{
+                "ern": "e", "key": "k", "versionId": "v3", "encrypted": true,
+                "lastAccessed": "2026-11-01T00:00:00Z", "lifecycleState": "ARCHIVED",
+                "restoredUntil": "2026-12-01T00:00:00Z"
+            }],
+            "total": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let put = esm.put_object(BUCKET, "k", b"data".to_vec()).await.unwrap();
+    assert_eq!(put.version_id.as_deref(), Some("v3"));
+    assert!(put.unchanged);
+
+    let objects = esm.list_all_objects(BUCKET, "").await.unwrap();
+    let object = &objects[0];
+    assert_eq!(object.version_id.as_deref(), Some("v3"));
+    assert!(object.encrypted);
+    assert_eq!(object.last_accessed.as_deref(), Some("2026-11-01T00:00:00Z"));
+    assert_eq!(object.lifecycle_state.as_deref(), Some("ARCHIVED"));
+    assert_eq!(object.restored_until.as_deref(), Some("2026-12-01T00:00:00Z"));
+}
+
+#[tokio::test]
+async fn bucket_lifecycle_round_trips() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "set-bucket-lifecycle"))
+        .and(body_json(json!({ "ern": BUCKET, "rules": [
+            { "id": "logs", "prefix": "logs/", "archiveAfterDays": 30, "restoreDays": 7, "enabled": true },
+            { "id": "off", "prefix": "", "archiveAfterDays": 90, "restoreDays": 1, "enabled": false }
+        ]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ern": BUCKET, "name": "b", "rules": [
+                { "id": "logs", "prefix": "logs/", "archiveAfterDays": 30, "restoreDays": 7, "enabled": true },
+                { "id": "off", "prefix": "", "archiveAfterDays": 90, "restoreDays": 1, "enabled": false }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "get-bucket-lifecycle"))
+        .and(body_json(json!({ "ern": BUCKET })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ern": BUCKET, "name": "b",
+            "rules": [{ "id": "logs", "prefix": "logs/", "archiveAfterDays": 30, "restoreDays": 7 }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "delete-bucket-lifecycle"))
+        .and(body_json(json!({ "ern": BUCKET })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ern": BUCKET, "name": "b", "rules": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let logs = LifecycleRule::new("logs", "logs/", 30, 7);
+    let off = LifecycleRule {
+        enabled: false,
+        ..LifecycleRule::new("off", "", 90, 1)
+    };
+    let set = esm
+        .set_bucket_lifecycle(BUCKET, &[logs.clone(), off.clone()])
+        .await
+        .unwrap();
+    assert_eq!(set.rules, vec![logs.clone(), off]);
+    // A rule without "enabled" is enabled.
+    assert_eq!(esm.get_bucket_lifecycle(BUCKET).await.unwrap().rules, vec![logs]);
+    assert!(esm.delete_bucket_lifecycle(BUCKET).await.unwrap().rules.is_empty());
+}
+
+#[tokio::test]
+async fn archive_and_restore_by_key_or_ern() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    let object = format!("{BUCKET}/k");
+    Mock::given(header("x-euclid-action", "archive-object"))
+        .and(body_json(json!({ "bucketErn": BUCKET, "key": "k" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ern": object, "bucketErn": BUCKET, "key": "k", "lifecycleState": "ARCHIVED",
+            "archivedAt": "2026-11-06T10:00:00Z", "archiveFile": "a.tar"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "archive-object"))
+        .and(body_json(json!({ "ern": object })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ern": object, "lifecycleState": "ARCHIVED" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "restore-object"))
+        .and(body_json(json!({ "bucketErn": BUCKET, "key": "k", "days": 3 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ern": object, "lifecycleState": "STANDARD",
+            "restoredAt": "2026-11-06T11:00:00Z", "restoredUntil": "2026-11-09T11:00:00Z"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "restore-object"))
+        .and(body_json(json!({ "ern": object })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ern": object, "lifecycleState": "STANDARD" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let archived = esm.archive_object(BUCKET, "k").await.unwrap();
+    assert_eq!(archived.lifecycle_state.as_deref(), Some("ARCHIVED"));
+    assert_eq!(archived.archive_file.as_deref(), Some("a.tar"));
+    esm.archive_object_by_ern(&object).await.unwrap();
+    let restored = esm.restore_object(BUCKET, "k", Some(3)).await.unwrap();
+    assert_eq!(restored.restored_until.as_deref(), Some("2026-11-09T11:00:00Z"));
+    let restored = esm.restore_object_by_ern(&object, None).await.unwrap();
+    assert_eq!(restored.lifecycle_state.as_deref(), Some("STANDARD"));
+}
+
+#[tokio::test]
+async fn verify_objects_pages_and_reports_problems() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "verify-objects"))
+        .and(body_json(json!({ "bucketErn": BUCKET, "afterKey": "", "limit": 2 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "bucketErn": BUCKET, "afterKey": "", "scanned": 2, "checked": 1, "skipped": 1,
+            "problems": [{
+                "key": "a", "ern": "e", "problem": "short", "recordedSize": 10, "fileSize": 4,
+                "expectedFileSize": 10, "internalName": "n", "internalDir": "d",
+                "created": "2026-11-06T10:00:00Z"
+            }],
+            "nextKey": "b"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "verify-objects"))
+        .and(body_json(json!({ "bucketErn": BUCKET, "afterKey": "b" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "bucketErn": BUCKET, "afterKey": "b", "scanned": 0, "checked": 0, "skipped": 0,
+            "problems": [], "nextKey": ""
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let page = esm.verify_objects(BUCKET, "", Some(2)).await.unwrap();
+    assert_eq!((page.scanned, page.checked, page.skipped), (2, 1, 1));
+    let problem = &page.problems[0];
+    assert_eq!(problem.problem.as_deref(), Some("short"));
+    assert_eq!((problem.recorded_size, problem.file_size), (10, 4));
+    assert_eq!(page.next_key.as_deref(), Some("b"));
+    let end = esm.verify_objects(BUCKET, "b", None).await.unwrap();
+    assert_eq!(end.next_key.as_deref(), Some(""));
 }

@@ -120,6 +120,25 @@ impl Esm {
             .await
     }
 
+    /// Turns versioning on or off and/or sets how many non-current versions are kept per key
+    /// (`0` keeps every version). What is `None` is left as it is; the server refuses a call
+    /// that sets neither.
+    pub async fn set_bucket_versioning(
+        &self,
+        ern: &str,
+        enabled: Option<bool>,
+        max_versions: Option<u64>,
+    ) -> Result<SetBucketVersioningResponse> {
+        let mut body = json!({ "ern": ern });
+        if let Some(enabled) = enabled {
+            body["enabled"] = json!(enabled);
+        }
+        if let Some(max_versions) = max_versions {
+            body["maxVersions"] = json!(max_versions);
+        }
+        self.client.call("set-bucket-versioning", &body).await
+    }
+
     /// Takes a bucket out of service: its events are held rather than delivered until
     /// [`start_bucket`](Self::start_bucket).
     pub async fn stop_bucket(&self, ern: &str) -> Result<BucketStoppedResponse> {
@@ -190,6 +209,65 @@ impl Esm {
     }
 
     // -----------------------------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------------------------
+
+    /// Replaces the bucket's lifecycle rules with `rules`. Validated as a whole: one bad rule
+    /// and none are set. Internal buckets cannot have rules.
+    pub async fn set_bucket_lifecycle(&self, ern: &str, rules: &[LifecycleRule]) -> Result<BucketLifecycleResponse> {
+        self.client
+            .call("set-bucket-lifecycle", &json!({ "ern": ern, "rules": rules }))
+            .await
+    }
+
+    pub async fn get_bucket_lifecycle(&self, ern: &str) -> Result<BucketLifecycleResponse> {
+        self.client.call("get-bucket-lifecycle", &json!({ "ern": ern })).await
+    }
+
+    /// Removes the bucket's lifecycle rules. Objects already archived stay archived.
+    pub async fn delete_bucket_lifecycle(&self, ern: &str) -> Result<BucketLifecycleResponse> {
+        self.client
+            .call("delete-bucket-lifecycle", &json!({ "ern": ern }))
+            .await
+    }
+
+    /// Archives one object by hand, with or without a rule covering it. Idempotent.
+    pub async fn archive_object(&self, bucket_ern: &str, key: &str) -> Result<ObjectLifecycleResponse> {
+        self.client
+            .call("archive-object", &json!({ "bucketErn": bucket_ern, "key": key }))
+            .await
+    }
+
+    /// [`archive_object`](Self::archive_object) by the object's ERN.
+    pub async fn archive_object_by_ern(&self, object_ern: &str) -> Result<ObjectLifecycleResponse> {
+        self.client.call("archive-object", &json!({ "ern": object_ern })).await
+    }
+
+    /// Brings an archived object back online for `days` days (1 to 36500), or for the covering
+    /// rule's `restore_days` when `None`. Idempotent.
+    pub async fn restore_object(
+        &self,
+        bucket_ern: &str,
+        key: &str,
+        days: Option<u64>,
+    ) -> Result<ObjectLifecycleResponse> {
+        let mut body = json!({ "bucketErn": bucket_ern, "key": key });
+        if let Some(days) = days {
+            body["days"] = json!(days);
+        }
+        self.client.call("restore-object", &body).await
+    }
+
+    /// [`restore_object`](Self::restore_object) by the object's ERN.
+    pub async fn restore_object_by_ern(&self, object_ern: &str, days: Option<u64>) -> Result<ObjectLifecycleResponse> {
+        let mut body = json!({ "ern": object_ern });
+        if let Some(days) = days {
+            body["days"] = json!(days);
+        }
+        self.client.call("restore-object", &body).await
+    }
+
+    // -----------------------------------------------------------------------------------------
     // Objects
     // -----------------------------------------------------------------------------------------
 
@@ -221,9 +299,55 @@ impl Esm {
         Ok(objects)
     }
 
-    /// Deletes one object by its ERN.
+    /// Deletes one object by its ERN, and every version of it.
     pub async fn delete_object(&self, ern: &str) -> Result<()> {
         self.client.call_unit("delete-object", &json!({ "ern": ern })).await
+    }
+
+    /// Deletes one version of an object. Deleting a non-current version leaves the key as it
+    /// reads; deleting the current one hands the key to the newest version left.
+    pub async fn delete_object_version(&self, ern: &str, version_id: &str) -> Result<DeleteObjectVersionResponse> {
+        if version_id.is_empty() {
+            return Err(Error::invalid(
+                "version_id must not be empty - delete_object deletes every version",
+            ));
+        }
+        let value = self
+            .client
+            .call_value("delete-object", &json!({ "ern": ern, "versionId": version_id }))
+            .await?;
+        // Deleting the only version there is deletes the object, which answers with no body.
+        if value.is_null() {
+            return Ok(DeleteObjectVersionResponse {
+                ern: Some(ern.to_owned()),
+                version_id: Some(version_id.to_owned()),
+                current_version_id: None,
+            });
+        }
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Every version of the object at `key`, the current one first.
+    pub async fn list_object_versions(&self, bucket_ern: &str, key: &str) -> Result<ListObjectVersionsResponse> {
+        self.client
+            .call("list-object-versions", &json!({ "bucketErn": bucket_ern, "key": key }))
+            .await
+    }
+
+    /// Checks one page of the bucket's objects, in key order after `after_key` (empty to start),
+    /// against their files on disk. `limit` (1 to 100000) is left to the server's default of
+    /// 10000 when `None`. Page on with the answer's `next_key` until it comes back empty.
+    pub async fn verify_objects(
+        &self,
+        bucket_ern: &str,
+        after_key: &str,
+        limit: Option<u64>,
+    ) -> Result<VerifyObjectsResponse> {
+        let mut body = json!({ "bucketErn": bucket_ern, "afterKey": after_key });
+        if let Some(limit) = limit {
+            body["limit"] = json!(limit);
+        }
+        self.client.call("verify-objects", &body).await
     }
 
     /// Deletes the objects with these keys from a bucket.
