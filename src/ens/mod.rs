@@ -85,6 +85,16 @@ impl Ens {
         self.client.call_unit("purge-topic", &json!({ "ern": ern })).await
     }
 
+    /// Purges a topic, optionally asynchronously. With `run_async` the server answers 202 as soon
+    /// as it has accepted the purge, with how many messages the topic held then, and empties it in
+    /// the background - for a topic too large to empty within the gateway's timeout. Nothing is
+    /// resumed: a purge interrupted halfway has removed part of the topic, and asking again removes
+    /// the rest.
+    pub async fn purge_topic_with(&self, ern: &str, run_async: bool) -> Result<PurgeTopicResponse> {
+        let body = json!({ "ern": ern, "async": run_async });
+        self.client.call("purge-topic", &body).await
+    }
+
     /// Purges every topic of the session's own account and region.
     pub async fn purge_all_topics(&self) -> Result<()> {
         let id = self.client.identity();
@@ -133,6 +143,22 @@ impl Ens {
     ) -> Result<SetTopicMaxMessageLengthResponse> {
         let body = json!({ "ern": ern, "maxMessageLength": max_message_length });
         self.client.call("set-topic-max-message-length", &body).await
+    }
+
+    /// Sets whether the topic deletes each message once it has been handed to every subscription
+    /// (`true`), or keeps it for the retention period as every topic does by default (`false`).
+    ///
+    /// It applies to what is published from now on: messages already on the topic stay until
+    /// their retention runs out (use [`purge_topic`](Self::purge_topic) to remove them). A message
+    /// on a topic with no subscription is kept either way, and what a topic deletes is gone for
+    /// [`resend_messages`](Self::resend_messages) too.
+    pub async fn set_topic_delete_after_delivery(
+        &self,
+        ern: &str,
+        delete_after_delivery: bool,
+    ) -> Result<SetTopicDeleteAfterDeliveryResponse> {
+        let body = json!({ "ern": ern, "deleteAfterDelivery": delete_after_delivery });
+        self.client.call("set-topic-delete-after-delivery", &body).await
     }
 
     pub async fn add_topic_tag(&self, ern: &str, key: &str, value: &str) -> Result<()> {

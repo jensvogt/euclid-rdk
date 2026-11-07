@@ -85,6 +85,15 @@ impl Eqs {
         self.client.call_unit("delete-queue", &json!({ "ern": ern })).await
     }
 
+    /// Deletes the queue only if nothing is using it: no message in it and no event still being
+    /// delivered into it. Otherwise the server refuses with 409 ([`Error::Service`] with status
+    /// 409) and the queue stays; a missing queue is a 404.
+    pub async fn delete_queue_if_empty(&self, ern: &str) -> Result<()> {
+        self.client
+            .call_unit("delete-queue", &json!({ "ern": ern, "ifEmpty": true }))
+            .await
+    }
+
     /// Reads one queue by name, or by ERN if `name_or_ern` starts with `ern:`.
     pub async fn get_queue(&self, name_or_ern: &str) -> Result<Queue> {
         let body = if name_or_ern.starts_with("ern:") {
@@ -115,6 +124,16 @@ impl Eqs {
     /// Removes every message from the queue.
     pub async fn purge_queue(&self, ern: &str) -> Result<()> {
         self.client.call_unit("purge-queue", &json!({ "ern": ern })).await
+    }
+
+    /// Purges a queue, optionally asynchronously. With `run_async` the server answers 202 as soon
+    /// as it has accepted the purge, with how many messages were available then, and empties the
+    /// queue in the background - for a backlog too large to remove within the gateway's timeout.
+    /// Nothing is resumed: a purge interrupted halfway has removed part of the queue, and asking
+    /// again removes the rest.
+    pub async fn purge_queue_with(&self, ern: &str, run_async: bool) -> Result<PurgeQueueResponse> {
+        let body = json!({ "ern": ern, "async": run_async });
+        self.client.call("purge-queue", &body).await
     }
 
     /// Purges every queue of the session's own account and region.
@@ -180,6 +199,18 @@ impl Eqs {
             }
         }
         Ok(serde_json::from_value(value)?)
+    }
+
+    /// Changes how many times a message may be received before it moves to the queue's dead letter
+    /// queue (1..=1000; anything else is refused with 400). This is the queue's `max_receive_count`.
+    ///
+    /// A message keeps the receive count it has and is measured against the new limit on its next
+    /// receive, so lowering the limit below a message's count moves it to the dead letter queue
+    /// then, not now. On a queue without a dead letter queue the limit decides nothing. What lands
+    /// in the dead letter queue is brought back with [`redrive_dlq`](Self::redrive_dlq).
+    pub async fn set_queue_max_retries(&self, ern: &str, max_retries: u64) -> Result<SetQueueMaxRetriesResponse> {
+        let body = json!({ "ern": ern, "maxRetries": max_retries });
+        self.client.call("set-queue-max-retries", &body).await
     }
 
     /// Drains a dead letter queue back onto the queues its messages came from.

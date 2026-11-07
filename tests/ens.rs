@@ -421,3 +421,68 @@ async fn errors_and_exists_topic() {
         "ens publish-message failed with status 400: message too large"
     );
 }
+
+#[tokio::test]
+async fn delete_after_delivery_setting_and_topic_fields() {
+    let server = MockServer::start().await;
+    let ens = ens(&server, true).await;
+    let set = mount(
+        &server,
+        "set-topic-delete-after-delivery",
+        json!({ "ern": TOPIC, "deleteAfterDelivery": true }),
+    )
+    .await;
+    mount(
+        &server,
+        "get-topic-metadata",
+        json!({ "ern": TOPIC, "deleteAfterDelivery": true, "held": 1 }),
+    )
+    .await;
+    mount(
+        &server,
+        "get-topic",
+        json!({ "topic": { "ern": TOPIC, "deleteAfterDelivery": true, "send": 12, "resend": "3" } }),
+    )
+    .await;
+
+    let answer = ens.set_topic_delete_after_delivery(TOPIC, true).await.unwrap();
+    assert_eq!(body(&set), json!({ "ern": TOPIC, "deleteAfterDelivery": true }));
+    assert!(answer.delete_after_delivery);
+    assert_eq!(answer.ern.as_deref(), Some(TOPIC));
+
+    assert!(ens.get_topic_metadata(TOPIC).await.unwrap().delete_after_delivery);
+
+    let topic = ens.get_topic(TOPIC).await.unwrap();
+    assert!(topic.delete_after_delivery);
+    assert_eq!((topic.send, topic.resend), (12, 3));
+}
+
+#[tokio::test]
+async fn topic_fields_default_when_an_older_server_leaves_them_out() {
+    let server = MockServer::start().await;
+    let ens = ens(&server, true).await;
+    mount(&server, "get-topic", json!({ "topic": { "ern": TOPIC } })).await;
+    mount(&server, "get-topic-metadata", json!({ "ern": TOPIC })).await;
+
+    let topic = ens.get_topic(TOPIC).await.unwrap();
+    assert!(!topic.delete_after_delivery);
+    assert_eq!((topic.send, topic.resend), (0, 0));
+    assert!(!ens.get_topic_metadata(TOPIC).await.unwrap().delete_after_delivery);
+}
+
+#[tokio::test]
+async fn purge_topic_asynchronously() {
+    let server = MockServer::start().await;
+    let ens = ens(&server, true).await;
+    let purge = mount(
+        &server,
+        "purge-topic",
+        json!({ "ern": TOPIC, "async": true, "messages": 42 }),
+    )
+    .await;
+
+    let answer = ens.purge_topic_with(TOPIC, true).await.unwrap();
+    assert_eq!(body(&purge), json!({ "ern": TOPIC, "async": true }));
+    assert!(answer.is_async);
+    assert_eq!(answer.messages, 42);
+}
