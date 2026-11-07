@@ -1,6 +1,6 @@
 [package]
 name = "euclid-rdk"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["Dr. Jens Vogt <jensvogt47@gmail.com>"]
 edition = "2021"
 rust-version = "1.88"
