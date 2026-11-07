@@ -72,6 +72,16 @@ impl Eap {
         self.client.call("scale-application", request).await
     }
 
+    /// Sets an application's per-instance memory and/or CPU limit without restarting anything; the
+    /// limits apply to instances as they start (use
+    /// [`restart_application`](Self::restart_application) to give them to running ones). A limit
+    /// left `None` is not sent and stays as it is. Refused with 400 when neither is set or a value
+    /// is out of range, and with 409 when the account's nodes cannot hold the application at the
+    /// new memory limit.
+    pub async fn set_application_limits(&self, request: &SetApplicationLimitsRequest) -> Result<Application> {
+        self.client.call("set-application-limits", request).await
+    }
+
     /// Deploys a new build already uploaded to the application's bucket; running instances are
     /// restarted onto it.
     pub async fn redeploy_application(&self, request: &RedeployApplicationRequest) -> Result<Application> {

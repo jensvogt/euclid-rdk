@@ -272,3 +272,276 @@ async fn reset_password_refuses_own_user() {
         Err(Error::InvalidArgument(_))
     ));
 }
+
+fn my_accounts() -> Value {
+    json!({
+        "accounts": [
+            { "accountId": "408066031601", "name": "development", "ern": "ern:eam::408066031601:account" },
+            { "accountId": "863459426936", "name": "home" },
+            { "accountId": "999", "name": "999" }
+        ],
+        "total": 3,
+        "homeAccountId": "863459426936"
+    })
+}
+
+async fn mount_my_accounts(server: &MockServer, expected_calls: u64) {
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "list-my-accounts"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(my_accounts()))
+        .expect(expected_calls)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn change_userid_and_email_name_the_user_and_return_it() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "change-userid"))
+        .and(body_json(json!({ "userId": "bob", "newUserId": "robert" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user": { "userId": "robert", "ern": "ern:eam::863459426936:user/robert", "email": "bob@example.com" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "change-email"))
+        .and(body_json(json!({ "userId": "robert", "email": "robert@example.com" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user": { "userId": "robert", "email": "robert@example.com" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "change-email"))
+        .and(body_json(json!({ "userId": "robert", "email": "taken@example.com" })))
+        .respond_with(ResponseTemplate::new(409).set_body_string("Email address already in use by user: alice"))
+        .mount(&server)
+        .await;
+
+    let session = Eam::for_server(server.uri())
+        .credentials("jens", "secret")
+        .no_cache()
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap();
+    let renamed = session.change_userid("bob", "robert").await.unwrap();
+    assert_eq!(renamed.user_id.as_deref(), Some("robert"));
+    assert_eq!(renamed.ern.as_deref(), Some("ern:eam::863459426936:user/robert"));
+
+    let changed = session.change_email("robert", "robert@example.com").await.unwrap();
+    assert_eq!(changed.email.as_deref(), Some("robert@example.com"));
+
+    let err = session.change_email("robert", "taken@example.com").await.unwrap_err();
+    assert_eq!(err.status(), Some(409));
+}
+
+#[tokio::test]
+async fn list_my_accounts_parses_and_resolves_by_id_then_name() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    mount_my_accounts(&server, 1).await;
+    let session = Eam::for_server(server.uri())
+        .credentials("jens", "secret")
+        .no_cache()
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap();
+
+    let mine = session.list_my_accounts().await.unwrap();
+    assert_eq!(mine.total, 3);
+    assert_eq!(mine.home_account_id.as_deref(), Some("863459426936"));
+    assert_eq!(mine.accounts[0].name.as_deref(), Some("development"));
+    assert_eq!(mine.resolve("408066031601"), Some("408066031601"));
+    assert_eq!(mine.resolve("development"), Some("408066031601"));
+    assert_eq!(mine.resolve("999"), Some("999"));
+    assert_eq!(mine.resolve("nope"), None);
+    assert_eq!(mine.resolve(""), None);
+}
+
+#[tokio::test]
+async fn login_with_account_works_in_it_before_choosing_the_namespace() {
+    let server = MockServer::start().await;
+    let token = jwt(3600);
+    mount_login(&server, &token, 1).await;
+    mount_my_accounts(&server, 1).await;
+    // The namespace is checked against the account switched to, so the request must carry it.
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "change-namespace"))
+        .and(header("x-euclid-account-id", "408066031601"))
+        .and(body_json(json!({ "namespace": "dev" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "list-users"))
+        .and(header("x-euclid-account-id", "408066031601"))
+        .and(header("x-euclid-namespace", "dev"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "users": [], "total": 0 })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("credentials");
+    let session = Eam::for_server(server.uri())
+        .credentials("jens", "secret")
+        .account("development")
+        .namespace("dev")
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap();
+    assert_eq!(session.account_id(), Some("408066031601"));
+    assert_eq!(session.namespace(), Some("dev"));
+    session.list_users(&ListUsersRequest::default()).await.unwrap();
+
+    let cached: Value = serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();
+    assert_eq!(cached["accountId"], "408066031601");
+    assert_eq!(cached["namespace"], "dev");
+
+    // Reusing the cache with the same account asks nothing more of the server: list-my-accounts
+    // and login are each expected exactly once.
+    let again = Eam::for_server(server.uri())
+        .account("408066031601")
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap();
+    assert_eq!(again.account_id(), Some("408066031601"));
+    assert_eq!(again.namespace(), Some("dev"));
+}
+
+#[tokio::test]
+async fn login_with_a_foreign_account_fails_but_keeps_the_home_session() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    mount_my_accounts(&server, 1).await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("credentials");
+
+    let err = Eam::for_server(server.uri())
+        .credentials("jens", "secret")
+        .account("production")
+        .namespace("prod")
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap_err();
+    match err {
+        Error::InvalidArgument(message) => {
+            assert!(
+                message.starts_with("'production' is not an account you may work in"),
+                "{message}"
+            );
+            assert!(message.contains("408066031601 (development)"), "{message}");
+            assert!(message.contains("863459426936 (home)"), "{message}");
+            // Named after itself: shown by id alone.
+            assert!(message.ends_with(", 999"), "{message}");
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
+
+    let cached: Value = serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();
+    assert_eq!(cached["accountId"], "863459426936");
+    assert_eq!(cached["namespace"], "");
+}
+
+#[tokio::test]
+async fn switch_account_clears_the_namespace_and_updates_the_cache() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    mount_my_accounts(&server, 2).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "change-namespace"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("credentials");
+    let mut session = Eam::for_server(server.uri())
+        .credentials("jens", "secret")
+        .namespace("prod")
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap();
+    assert_eq!(session.namespace(), Some("prod"));
+
+    session.switch_account("development").await.unwrap();
+    assert_eq!(session.account_id(), Some("408066031601"));
+    assert_eq!(session.namespace(), None);
+    let cached: Value = serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();
+    assert_eq!(cached["accountId"], "408066031601");
+    assert_eq!(cached["namespace"], "");
+
+    assert!(matches!(
+        session.switch_account("elsewhere").await,
+        Err(Error::InvalidArgument(_))
+    ));
+    assert_eq!(session.account_id(), Some("408066031601"));
+}
+
+#[tokio::test]
+async fn refresh_session_adopts_the_new_token_and_keeps_account_and_namespace() {
+    let server = MockServer::start().await;
+    let old = jwt(3600);
+    let new = jwt(7200);
+    mount_login(&server, &old, 1).await;
+    mount_my_accounts(&server, 1).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "change-namespace"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "refresh-session"))
+        .and(header("authorization", format!("Bearer {old}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(login_body(&new)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "get-user"))
+        .and(header("authorization", format!("Bearer {new}").as_str()))
+        .and(header("x-euclid-account-id", "408066031601"))
+        .and(header("x-euclid-namespace", "dev"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "user": { "userId": "jens" } })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("credentials");
+    let mut session = Eam::for_server(server.uri())
+        .credentials("jens", "secret")
+        .account("408066031601")
+        .namespace("dev")
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap();
+
+    session.refresh_session().await.unwrap();
+    assert_eq!(session.token(), new);
+    assert_eq!(session.account_id(), Some("408066031601"));
+    assert_eq!(session.namespace(), Some("dev"));
+    session.get_user("jens").await.unwrap();
+
+    let cached: Value = serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();
+    assert_eq!(cached["token"], new.as_str());
+    assert_eq!(cached["accountId"], "408066031601");
+}

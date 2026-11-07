@@ -10,7 +10,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use euclid_rdk::eap::{
     ApplicationType, CreateApplicationRequest, EgressLimiter, EgressTimeout, ScaleApplicationRequest,
-    UpdateApplicationRequest,
+    SetApplicationLimitsRequest, UpdateApplicationRequest,
 };
 use euclid_rdk::{Eam, Eap, Error};
 use serde_json::{json, Value};
@@ -92,6 +92,7 @@ fn application_json() -> Value {
         "resources": ["ern:eqs:eu-central-1:000000000000:development:queue:orders"],
         "userId": "app-billing", "userExists": true, "logLevel": "INFO",
         "minInstances": 1, "maxInstances": 4, "readyTimeoutMs": 30000,
+        "memoryLimitMb": 512, "cpuLimit": 0.5, "artifactSize": 1048576,
         "nodeLabels": { "zone": "a" }, "type": "PROCESS", "schedule": "", "nextRunAt": "",
         "desiredState": "RUNNING", "state": "RUNNING", "instances": 2,
         "endpoints": [{ "instanceId": "i-1", "pid": 4711, "httpPort": 8081 }, { "instanceId": "i-2" }],
@@ -143,6 +144,9 @@ async fn applications_parse_like_the_jdk() {
     assert_eq!(app.endpoints[1].pid, -1);
     assert_eq!(app.endpoints[1].http_port, 0);
     assert_eq!(app.min_instances, 1);
+    assert_eq!(app.memory_limit_mb, 512);
+    assert_eq!(app.cpu_limit, 0.5);
+    assert_eq!(app.artifact_size, 1_048_576);
     assert!(app.user_exists);
 
     // Environment values never show in Debug output.
@@ -224,6 +228,66 @@ async fn create_and_update_send_only_what_is_set() {
         bodies(&scaled),
         [json!({ "applicationId": "billing", "minInstances": 2 })]
     );
+}
+
+#[tokio::test]
+async fn set_application_limits_sends_only_the_limits_given() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let limits = mount(&server, "set-application-limits", application_json()).await;
+
+    let app = eap
+        .set_application_limits(&SetApplicationLimitsRequest {
+            application_id: Some("billing".into()),
+            memory_limit_mb: Some(512),
+            cpu_limit: Some(0.5),
+        })
+        .await
+        .unwrap();
+    assert_eq!(app.memory_limit_mb, 512);
+    assert_eq!(app.cpu_limit, 0.5);
+
+    // A limit not given stays out of the body: the server would refuse one sent as null.
+    eap.set_application_limits(&SetApplicationLimitsRequest {
+        application_id: Some("billing".into()),
+        cpu_limit: Some(2.0),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        bodies(&limits),
+        [
+            json!({ "applicationId": "billing", "memoryLimitMb": 512, "cpuLimit": 0.5 }),
+            json!({ "applicationId": "billing", "cpuLimit": 2.0 }),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn set_application_limits_surfaces_a_refused_admission() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    mount_status(
+        &server,
+        "set-application-limits",
+        409,
+        json!({ "error": "the account's nodes cannot hold 2 instances of 64000 MiB" }),
+    )
+    .await;
+    let err = eap
+        .set_application_limits(&SetApplicationLimitsRequest {
+            application_id: Some("billing".into()),
+            memory_limit_mb: Some(64000),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), Some(409));
+    assert!(err
+        .to_string()
+        .starts_with("eap set-application-limits failed with status 409"));
 }
 
 #[tokio::test]
@@ -318,7 +382,10 @@ async fn nodes_and_egress_sites() {
     mount(
         &server,
         "list-nodes",
-        json!({ "nodes": [{ "name": "n1", "cpuCount": 8, "live": true }, { "name": "n2" }] }),
+        json!({ "nodes": [
+            { "name": "n1", "cpuCount": 8, "memoryMb": 12288, "memoryTotalMb": 16384, "memoryUsedMb": 4096, "live": true },
+            { "name": "n2" }
+        ] }),
     )
     .await;
     mount(
@@ -348,6 +415,10 @@ async fn nodes_and_egress_sites() {
     let nodes = eap.list_nodes().await.unwrap();
     assert_eq!(nodes.total, 2, "total falls back to the number of nodes");
     assert_eq!(nodes.nodes[0].cpu_count, 8);
+    assert_eq!(nodes.nodes[0].memory_mb, 12288);
+    assert_eq!(nodes.nodes[0].memory_total_mb, 16384);
+    assert_eq!(nodes.nodes[0].memory_used_mb, 4096);
+    assert_eq!(nodes.nodes[1].memory_total_mb, 0);
     assert_eq!(nodes.nodes[0].applications, None);
     let node = eap.get_node("n1").await.unwrap();
     assert_eq!(node.applications.unwrap()[0].running, 1);
