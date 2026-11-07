@@ -282,3 +282,19 @@ async fn port_conflict_is_a_409() {
         .unwrap_err();
     assert_eq!(err.status(), Some(409));
 }
+
+#[tokio::test]
+async fn user_count_is_read_and_defaults_to_zero() {
+    let server = MockServer::start().await;
+    let older_server = MockServer::start().await;
+    let current = ets(&server, true).await;
+    let older = ets(&older_server, true).await;
+
+    let mut with_count = server_json();
+    with_count["userCount"] = json!(4);
+    mount(&server, "get-server", with_count).await;
+    mount(&older_server, "get-server", server_json()).await;
+
+    assert_eq!(current.get_server("inbound").await.unwrap().user_count, 4);
+    assert_eq!(older.get_server("inbound").await.unwrap().user_count, 0);
+}

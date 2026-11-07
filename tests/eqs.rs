@@ -462,3 +462,71 @@ async fn message_attribute_and_redrive_parse() {
     assert_eq!(redrive.messages, 4);
     assert_eq!(redrive.targets[0].queue_ern.as_deref(), Some("ern:q"));
 }
+
+#[tokio::test]
+async fn set_queue_max_retries_sends_ern_and_limit() {
+    let server = MockServer::start().await;
+    let eqs = eqs(&server, true).await;
+    let seen = mount(
+        &server,
+        "set-queue-max-retries",
+        json!({ "ern": QUEUE, "maxRetries": 7 }),
+    )
+    .await;
+
+    let answer = eqs.set_queue_max_retries(QUEUE, 7).await.unwrap();
+    assert_eq!(seen.lock().unwrap()[0], json!({ "ern": QUEUE, "maxRetries": 7 }));
+    assert_eq!(answer.max_retries, 7);
+    assert_eq!(answer.ern.as_deref(), Some(QUEUE));
+}
+
+#[tokio::test]
+async fn set_queue_max_retries_out_of_range_is_a_service_error() {
+    let server = MockServer::start().await;
+    let eqs = eqs(&server, true).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "set-queue-max-retries"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({ "message": "maxRetries must be between 1 and 1000" })),
+        )
+        .mount(&server)
+        .await;
+
+    let err = eqs.set_queue_max_retries(QUEUE, 0).await.unwrap_err();
+    assert_eq!(err.status(), Some(400));
+}
+
+#[tokio::test]
+async fn delete_queue_if_empty_and_async_purge() {
+    let server = MockServer::start().await;
+    let eqs = eqs(&server, true).await;
+    let delete = mount(&server, "delete-queue", json!({})).await;
+    let purge = mount(
+        &server,
+        "purge-queue",
+        json!({ "ern": QUEUE, "async": true, "messages": 1500 }),
+    )
+    .await;
+
+    eqs.delete_queue_if_empty(QUEUE).await.unwrap();
+    assert_eq!(delete.lock().unwrap()[0], json!({ "ern": QUEUE, "ifEmpty": true }));
+
+    let answer = eqs.purge_queue_with(QUEUE, true).await.unwrap();
+    assert_eq!(purge.lock().unwrap()[0], json!({ "ern": QUEUE, "async": true }));
+    assert!(answer.is_async);
+    assert_eq!(answer.messages, 1500);
+}
+
+#[tokio::test]
+async fn delete_queue_if_empty_refused_with_409() {
+    let server = MockServer::start().await;
+    let eqs = eqs(&server, true).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "delete-queue"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({ "message": "Queue is not empty" })))
+        .mount(&server)
+        .await;
+
+    let err = eqs.delete_queue_if_empty(QUEUE).await.unwrap_err();
+    assert!(matches!(err, Error::Service { status: 409, .. }));
+}

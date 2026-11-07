@@ -5,7 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use euclid_rdk::ekv::{CreateTableRequest, KeyType, ListTablesRequest, QueryRequest, SortOperator};
+use euclid_rdk::ekv::{
+    CreateTableRequest, KeyType, ListTablesRequest, QueryRequest, ScanRequest, SortDirection, SortOperator,
+};
 use euclid_rdk::{Eam, Ekv, Error};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -365,4 +367,77 @@ async fn service_errors_carry_action_and_status() {
         err.to_string(),
         r#"ekv get-item failed with status 404: {"error":"No such item"}"#
     );
+}
+
+#[tokio::test]
+async fn query_reports_the_total_matched() {
+    let server = MockServer::start().await;
+    let server2 = MockServer::start().await;
+    let current = ekv(&server, true).await;
+    let older = ekv(&server2, true).await;
+    mount(
+        &server,
+        "query",
+        json!({ "items": [{ "customer": "alice", "order": "o1" }], "count": 1, "total": 14 }),
+    )
+    .await;
+    mount(
+        &server2,
+        "query",
+        json!({ "items": [{ "customer": "alice", "order": "o1" }, { "customer": "alice", "order": "o2" }] }),
+    )
+    .await;
+
+    let page = current.query("orders", "alice").await.unwrap();
+    assert_eq!((page.count, page.total), (1, 14));
+
+    // A server that predates the total: it is what came back.
+    let page = older.query("orders", "alice").await.unwrap();
+    assert_eq!((page.count, page.total), (2, 2));
+}
+
+#[tokio::test]
+async fn scan_with_sends_ordering_and_filters() {
+    let server = MockServer::start().await;
+    let ekv = ekv(&server, true).await;
+    let seen = mount(
+        &server,
+        "scan",
+        json!({ "items": [{ "id": 1 }], "count": 1, "total": 9 }),
+    )
+    .await;
+
+    let page = ekv
+        .scan_with(&ScanRequest {
+            table: "orders".into(),
+            page_size: 5,
+            sort_column: "modified".into(),
+            sort_direction: SortDirection::Desc,
+            modified_from: "2026-11-01T00:00:00Z".into(),
+            attribute_name: "amount".into(),
+            attribute_operator: SortOperator::Between,
+            attribute_value: json!(10),
+            attribute_upper: json!(20),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        body(&seen),
+        json!({ "table": "orders", "pageSize": 5, "pageIndex": 0, "sortColumn": "modified",
+                "sortDirection": "desc", "modifiedFrom": "2026-11-01T00:00:00Z", "modifiedTo": "",
+                "attributeName": "amount", "attributeOperator": "between", "attributeValue": 10,
+                "attributeUpper": 20 })
+    );
+    assert_eq!((page.count, page.total), (1, 9));
+
+    ekv.scan_with(&ScanRequest {
+        table: "orders".into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(body(&seen)["attributeOperator"], "");
+    assert_eq!(body(&seen)["attributeValue"], Value::Null);
+    assert_eq!(body(&seen)["sortDirection"], "asc");
 }
