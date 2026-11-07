@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use euclid_rdk::eag::{Protocol, RouteAuthentication, RouteRequest};
+use euclid_rdk::eag::{Protocol, RouteAuthentication, RouteRequest, RouteType, UploadSpec};
 use euclid_rdk::{Eag, Eam, Error};
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method};
@@ -286,4 +286,68 @@ fn enum_wire_values_round_trip() {
         serde_json::to_value(RouteAuthentication::Basic).unwrap(),
         json!("BASIC")
     );
+}
+
+#[tokio::test]
+async fn upload_routes_send_type_bucket_and_limits() {
+    const BUCKET: &str = "ern:esm:eu-central-1:000000000000:development:bucket:inbox";
+    let server = MockServer::start().await;
+    let mut answer = route_json();
+    answer["type"] = json!("UPLOAD");
+    answer["applicationId"] = json!("");
+    answer["timeout"] = json!(600);
+    answer["upload"] = json!({ "bucket": BUCKET, "keyPrefix": "onix/", "maxBytes": 12_000_000_000_u64,
+                               "partSize": 5_242_880, "contentTypes": ["application/xml"] });
+    let seen = mount(&server, "create-route", answer).await;
+    let eag = eag(&server, true).await;
+
+    let route = eag
+        .create_upload_route("onix", "/upload/onix", BUCKET, RouteAuthentication::Basic)
+        .await
+        .unwrap();
+    assert_eq!(
+        last(&seen).0,
+        json!({ "routeId": "onix", "path": "/upload/onix", "type": "UPLOAD", "bucket": BUCKET,
+                "authentication": "BASIC" })
+    );
+    assert_eq!(route.kind, RouteType::Upload);
+    assert_eq!(route.timeout, 600);
+    assert_eq!(route.upload.bucket.as_deref(), Some(BUCKET));
+    assert_eq!(route.upload.key_prefix.as_deref(), Some("onix/"));
+    assert_eq!(route.upload.max_bytes, 12_000_000_000);
+    assert_eq!(route.upload.part_size, 5_242_880);
+    assert_eq!(route.upload.content_types, ["application/xml"]);
+
+    eag.create_route_with(&RouteRequest {
+        route_id: Some("onix".into()),
+        path: Some("/upload/onix".into()),
+        kind: Some(RouteType::Upload),
+        bucket: Some(BUCKET.into()),
+        key_prefix: Some("onix/".into()),
+        max_bytes: Some(1024),
+        part_size: Some(512),
+        content_types: Some(vec!["application/xml".into()]),
+        timeout: Some(600),
+        authentication: Some(RouteAuthentication::Euclid),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        last(&seen).0,
+        json!({ "routeId": "onix", "path": "/upload/onix", "type": "UPLOAD", "bucket": BUCKET,
+                "keyPrefix": "onix/", "maxBytes": 1024, "partSize": 512,
+                "contentTypes": ["application/xml"], "timeout": 600, "authentication": "EUCLID" })
+    );
+}
+
+#[tokio::test]
+async fn route_type_and_upload_default_when_an_older_server_leaves_them_out() {
+    let server = MockServer::start().await;
+    mount(&server, "get-route", route_json()).await;
+    let route = eag(&server, true).await.get_route("produkte").await.unwrap();
+    assert_eq!(route.kind, RouteType::Unknown);
+    assert_eq!(route.timeout, 0);
+    assert_eq!(route.upload, UploadSpec::default());
+    assert_eq!(RouteType::from_wire_value("proxy"), RouteType::Proxy);
 }

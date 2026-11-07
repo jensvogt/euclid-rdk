@@ -54,12 +54,23 @@ pub struct Topic {
     pub messages: u64,
     #[serde(default = "default_max_message_length", deserialize_with = "lenient_u64")]
     pub max_message_length: u64,
+    /// How many messages have ever been published to the topic - a lifetime total that, unlike
+    /// `messages`, does not fall on a purge or when retention removes what the topic held.
+    #[serde(default, deserialize_with = "lenient_u64")]
+    pub send: u64,
+    /// How many messages have ever been handed to the subscriptions again by `resend-messages`.
+    #[serde(default, deserialize_with = "lenient_u64")]
+    pub resend: u64,
     #[serde(default)]
     pub status: Option<String>,
     /// Seconds a published message is kept; 0 follows the installation default,
     /// [`RETENTION_FOREVER`] keeps everything.
     #[serde(default, deserialize_with = "lenient_i64")]
     pub retention_period: i64,
+    /// Whether a message is deleted once it has been handed to every subscription, instead of
+    /// being kept for the retention period. `false` from a server that predates the setting.
+    #[serde(default)]
+    pub delete_after_delivery: bool,
     #[serde(default, deserialize_with = "lenient_string")]
     pub created: Option<String>,
     #[serde(default, deserialize_with = "lenient_string")]
@@ -138,6 +149,8 @@ pub struct TopicMetadata {
     pub status: Option<String>,
     #[serde(deserialize_with = "lenient_i64")]
     pub retention_period: i64,
+    /// Whether a message is deleted once it has been handed to every subscription.
+    pub delete_after_delivery: bool,
     /// Messages held while the topic is stopped.
     #[serde(deserialize_with = "lenient_u64")]
     pub held: u64,
@@ -168,6 +181,26 @@ pub struct SetTopicMaxMessageLengthResponse {
     pub ern: Option<String>,
     #[serde(deserialize_with = "lenient_u64")]
     pub max_message_length: u64,
+}
+
+/// Answer to `set-topic-delete-after-delivery`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetTopicDeleteAfterDeliveryResponse {
+    pub ern: Option<String>,
+    pub delete_after_delivery: bool,
+}
+
+/// Answer to `purge-topic`. With `async` the purge is only accepted, and `messages` says how many
+/// the topic held when it was; without it the topic is already empty and `messages` is 0.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PurgeTopicResponse {
+    pub ern: Option<String>,
+    #[serde(rename = "async")]
+    pub is_async: bool,
+    #[serde(deserialize_with = "lenient_u64")]
+    pub messages: u64,
 }
 
 /// Answer to `resend-messages`. With `async`, `messages` is what was taken on and `resent`/`held`

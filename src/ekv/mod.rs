@@ -142,8 +142,10 @@ impl Ekv {
 
     pub async fn query_with(&self, request: &QueryRequest) -> Result<QueryResponse> {
         let raw: RawItems = self.client.call("query", request).await?;
+        let count = raw.count.unwrap_or(raw.items.len() as u64);
         Ok(QueryResponse {
-            count: raw.count.unwrap_or(raw.items.len() as u64),
+            count,
+            total: raw.total.unwrap_or(count),
             items: raw.items,
         })
     }
@@ -151,10 +153,20 @@ impl Ekv {
     /// Reads a table page by page, in no particular order. A page size of 0 returns every item.
     pub async fn scan(&self, table: &str, page_size: u64, page_index: u64) -> Result<ScanResponse> {
         let body = json!({ "table": table, "pageSize": page_size, "pageIndex": page_index });
-        let raw: RawItems = self.client.call("scan", &body).await?;
+        self.do_scan(&body).await
+    }
+
+    /// Scans a table with ordering and filters: by when an item was last written, and by a
+    /// condition on any attribute. An invalid timestamp or operator is refused with 400.
+    pub async fn scan_with(&self, request: &ScanRequest) -> Result<ScanResponse> {
+        self.do_scan(request).await
+    }
+
+    async fn do_scan(&self, body: &impl Serialize) -> Result<ScanResponse> {
+        let raw: RawItems = self.client.call("scan", body).await?;
         Ok(ScanResponse {
             count: raw.count.unwrap_or(raw.items.len() as u64),
-            total: raw.total,
+            total: raw.total.unwrap_or_default(),
             items: raw.items,
         })
     }

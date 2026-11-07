@@ -116,19 +116,42 @@ impl Esm {
     /// Reads an object whole. The server answers 413 (as [`Error::Service`]) for an object larger
     /// than `max_inline_size`; [`download_file`](Self::download_file) handles that case.
     pub async fn get_object(&self, bucket_ern: &str, key: &str, max_inline_size: u64) -> Result<Vec<u8>> {
-        let response = self.get_object_response(bucket_ern, key, max_inline_size).await?;
+        self.get_object_with(bucket_ern, key, max_inline_size, None).await
+    }
+
+    /// [`get_object`](Self::get_object) of a non-current version (sent as `x-euclid-version-id`),
+    /// or of the current one when `version_id` is `None`.
+    pub async fn get_object_with(
+        &self,
+        bucket_ern: &str,
+        key: &str,
+        max_inline_size: u64,
+        version_id: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let response = self
+            .get_object_response(bucket_ern, key, max_inline_size, version_id)
+            .await?;
         if !response.is_success() {
             return Err(Error::service("esm", "get-object", response.status, response.text()));
         }
         Ok(response.body)
     }
 
-    async fn get_object_response(&self, bucket_ern: &str, key: &str, max_inline_size: u64) -> Result<Response> {
-        let headers = vec![
+    async fn get_object_response(
+        &self,
+        bucket_ern: &str,
+        key: &str,
+        max_inline_size: u64,
+        version_id: Option<&str>,
+    ) -> Result<Response> {
+        let mut headers = vec![
             ("x-euclid-bucket-ern".to_owned(), bucket_ern.to_owned()),
             ("x-euclid-key".to_owned(), key.to_owned()),
             ("x-euclid-part-size".to_owned(), max_inline_size.to_string()),
         ];
+        if let Some(version_id) = version_id.filter(|v| !v.is_empty()) {
+            headers.push(("x-euclid-version-id".to_owned(), version_id.to_owned()));
+        }
         self.client
             .send("get-object", Vec::new(), &self.binary_options(headers))
             .await
@@ -211,17 +234,28 @@ impl Esm {
         key: &str,
         expected_concurrency: usize,
     ) -> Result<CreateDownloadResponse> {
+        self.create_download_with(bucket_ern, key, expected_concurrency, None)
+            .await
+    }
+
+    /// [`create_download`](Self::create_download) of a non-current version, or of the current
+    /// one when `version_id` is `None`.
+    pub async fn create_download_with(
+        &self,
+        bucket_ern: &str,
+        key: &str,
+        expected_concurrency: usize,
+        version_id: Option<&str>,
+    ) -> Result<CreateDownloadResponse> {
         let headers = vec![(
             "x-euclid-expected-concurrency".to_owned(),
             expected_concurrency.to_string(),
         )];
-        let response = self
-            .json_with_retry(
-                "create-download",
-                &json!({ "bucketErn": bucket_ern, "key": key }),
-                headers,
-            )
-            .await?;
+        let mut body = json!({ "bucketErn": bucket_ern, "key": key });
+        if let Some(version_id) = version_id.filter(|v| !v.is_empty()) {
+            body["versionId"] = json!(version_id);
+        }
+        let response = self.json_with_retry("create-download", &body, headers).await?;
         Ok(serde_json::from_slice(&response.body)?)
     }
 
@@ -305,7 +339,8 @@ impl Esm {
 
     /// Downloads an object to a file, creating its directory, and returns the bytes written. An
     /// object up to `options.part_size` comes back in one `get-object`; a larger one in parts,
-    /// `options.concurrency` at a time, each written at its own offset.
+    /// `options.concurrency` at a time, each written at its own offset. With
+    /// `options.version_id`, that version is downloaded instead of the current one.
     pub async fn download_file(
         &self,
         bucket_ern: &str,
@@ -320,7 +355,10 @@ impl Esm {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let inline = self.get_object_response(bucket_ern, key, part_size as u64).await?;
+        let version_id = options.version_id.as_deref();
+        let inline = self
+            .get_object_response(bucket_ern, key, part_size as u64, version_id)
+            .await?;
         if inline.status != PAYLOAD_TOO_LARGE {
             if !inline.is_success() {
                 return Err(Error::service("esm", "get-object", inline.status, inline.text()));
@@ -329,7 +367,9 @@ impl Esm {
             return Ok(inline.body.len() as u64);
         }
 
-        let created = self.create_download(bucket_ern, key, concurrency).await?;
+        let created = self
+            .create_download_with(bucket_ern, key, concurrency, version_id)
+            .await?;
         let download_id = created.download_id.unwrap_or_default();
         let total = created.size;
         // Pre-size the file so each part can be written at its offset in whatever order parts
@@ -407,6 +447,11 @@ impl Esm {
             std::env::current_dir()?.join(directory)
         };
         tokio::fs::create_dir_all(&root).await?;
+        // A version belongs to one key; every key here is read at its current version.
+        let options = &TransferOptions {
+            version_id: None,
+            ..options.clone()
+        };
 
         let mut written = Vec::new();
         for object in self.list_all_objects(bucket_ern, prefix).await? {

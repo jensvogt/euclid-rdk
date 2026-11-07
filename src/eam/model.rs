@@ -109,6 +109,22 @@ pub struct RegisterRequest {
     pub is_admin: bool,
 }
 
+/// Body of `eam change-userid`. Both ids are always named: there is no "me" default.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChangeUserIdRequest {
+    pub user_id: String,
+    pub new_user_id: String,
+}
+
+/// Body of `eam change-email`. The user is always named: there is no "me" default.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChangeEmailRequest {
+    pub user_id: String,
+    pub email: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChangePasswordRequest {
@@ -236,6 +252,40 @@ impl Default for ListAccountsRequest {
 pub struct ListAccountsResponse {
     pub accounts: Vec<Account>,
     pub total: u64,
+}
+
+/// Answer to `list-my-accounts`: the accounts the caller may work in.
+///
+/// Not [`ListAccountsResponse`] with a filter - that is every account of the installation, for
+/// administrators. This one is about the caller: the home account, always, plus every account a
+/// grant held by them or one of their groups names (an administrator gets every account). An
+/// account named by a grant but missing from the installation is listed under its id, with the id
+/// as its name and no ERN, description or dates.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ListMyAccountsResponse {
+    /// Ordered by account id.
+    pub accounts: Vec<Account>,
+    pub total: u64,
+    /// The account the caller was registered in - always among `accounts`, and the one to select
+    /// when nothing else was asked for.
+    pub home_account_id: Option<String>,
+}
+
+impl ListMyAccountsResponse {
+    /// The id of the account `wanted` names - by account id, or else by name - among these.
+    /// An id wins outright over a name, since nothing stops an account being named like another
+    /// account's id; this is how `euclid-cli eam login --account` resolves it.
+    pub fn resolve(&self, wanted: &str) -> Option<&str> {
+        let ids = self.accounts.iter().filter_map(|a| a.account_id.as_deref());
+        if let Some(id) = ids.clone().find(|id| *id == wanted) {
+            return Some(id);
+        }
+        self.accounts
+            .iter()
+            .find(|a| !wanted.is_empty() && a.name.as_deref() == Some(wanted))
+            .and_then(|a| a.account_id.as_deref())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

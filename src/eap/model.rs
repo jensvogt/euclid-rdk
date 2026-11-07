@@ -179,6 +179,9 @@ pub struct Application {
     pub artifact_key: Option<String>,
     pub version: Option<String>,
     pub md5_sum: Option<String>,
+    /// Size of the deployed artifact in bytes; `0` for one deployed before this was recorded.
+    #[serde(deserialize_with = "lenient_u64")]
+    pub artifact_size: u64,
     pub command: Option<String>,
     #[serde(deserialize_with = "lenient_string_list")]
     pub arguments: Vec<String>,
@@ -198,6 +201,12 @@ pub struct Application {
     pub max_instances: u64,
     #[serde(deserialize_with = "lenient_u64")]
     pub ready_timeout_ms: u64,
+    /// Memory each instance may use, in MiB; `0` for no limit.
+    #[serde(deserialize_with = "lenient_u64")]
+    pub memory_limit_mb: u64,
+    /// CPU each instance may use, in cores; `0.0` for no limit.
+    #[serde(deserialize_with = "lenient_f64")]
+    pub cpu_limit: f64,
     #[serde(deserialize_with = "lenient_string_map")]
     pub node_labels: BTreeMap<String, String>,
     #[serde(rename = "type")]
@@ -233,6 +242,7 @@ impl fmt::Debug for Application {
             .field("artifact_key", &self.artifact_key)
             .field("version", &self.version)
             .field("md5_sum", &self.md5_sum)
+            .field("artifact_size", &self.artifact_size)
             .field("command", &self.command)
             .field("arguments", &self.arguments)
             .field("environment", &RedactedEnv(&self.environment))
@@ -243,6 +253,8 @@ impl fmt::Debug for Application {
             .field("min_instances", &self.min_instances)
             .field("max_instances", &self.max_instances)
             .field("ready_timeout_ms", &self.ready_timeout_ms)
+            .field("memory_limit_mb", &self.memory_limit_mb)
+            .field("cpu_limit", &self.cpu_limit)
             .field("node_labels", &self.node_labels)
             .field("application_type", &self.application_type)
             .field("schedule", &self.schedule)
@@ -422,6 +434,27 @@ pub struct ScaleApplicationRequest {
     pub max_instances: Option<u64>,
 }
 
+/// Body of `set-application-limits`: an application's per-instance resource limits. A limit left
+/// `None` is not sent and stays as it is (the server would refuse one sent as `null`); at least
+/// one has to be set. `0` removes a limit.
+///
+/// The limits reach instances as they start - restart the application to give them to running
+/// ones. Over its memory limit an instance is killed by the kernel (`OOM_KILLED`); over its CPU
+/// limit it is only throttled.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetApplicationLimitsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub application_id: Option<String>,
+    /// Memory each instance may use, in MiB: `0` for no limit, otherwise at least 64. Raising it
+    /// is refused with 409 if the account's nodes cannot hold the application's floor at that size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_limit_mb: Option<u64>,
+    /// CPU each instance may use, in cores (e.g. `0.5`): `0` for no limit, otherwise at least 0.01.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_limit: Option<f64>,
+}
+
 /// Body of `redeploy-application`: make a new build (already uploaded to the application's
 /// bucket) the deployed one. Refused unless both version and bytes differ from what is deployed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -560,6 +593,15 @@ pub struct Node {
     pub labels: BTreeMap<String, String>,
     #[serde(deserialize_with = "lenient_u64")]
     pub cpu_count: u64,
+    /// Memory the node offers applications, in MiB - less than it has installed.
+    #[serde(deserialize_with = "lenient_u64")]
+    pub memory_mb: u64,
+    /// Installed memory, in MiB; `0` for a node that has not said.
+    #[serde(deserialize_with = "lenient_u64")]
+    pub memory_total_mb: u64,
+    /// Memory in use at the node's last renewal, in MiB; `0` for a node that has not said.
+    #[serde(deserialize_with = "lenient_u64")]
+    pub memory_used_mb: u64,
     pub version: Option<String>,
     pub os: Option<String>,
     pub arch: Option<String>,

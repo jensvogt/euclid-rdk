@@ -11,8 +11,9 @@ Async, built on `reqwest`; use it from any Tokio runtime. Requires Rust 1.88+.
 
 Status: **EAM** (access management), **EQS** (queues), **ENS** (pub/sub topics), **ESM** (object
 storage), **EKV** (key-value tables), **ESS** (secrets), **EKM** (keys and certificates), **ETS**
-(transfer servers), **EAG** (API gateway), **EAP** (application platform) and **EMO** (metrics) are
-implemented. EES follows.
+(transfer servers), **EAG** (API gateway), **EAP** (application platform), **EMO** (metrics),
+**EES** (events, incl. a WebSocket stream), **EAD** (audit trail) and **EMM** (module manager) are
+implemented - every module euclid-jdk has.
 
 ## Installation
 
@@ -347,6 +348,82 @@ published as `.count`/`.total` (rates) and `.max` (gauge), which survive EMO's r
 described as seconds are published in milliseconds. A failed scheduled push is logged (`log`) and
 dropped rather than retried.
 
+### EES events
+
+```rust
+use euclid_rdk::ees::{self, SubscribeEventsRequest, ESM_OBJECT_CREATED};
+
+let ees = session.ees();                      // or Euclid::for_server(url).ees().await?
+ees.subscribe_events_with(&SubscribeEventsRequest {
+    name: "invoice-import".into(),
+    event_types: vec![ESM_OBJECT_CREATED.into()],
+    filter: ees::filter([("bucketName", "inbox")]),
+    ..Default::default()                      // durable
+}).await?;
+
+let claimed = ees.receive_events_with("invoice-import", 10, 20, 300).await?;  // long poll <= 20 s
+for event in &claimed.events {
+    println!("{:?}", event.esm_object().and_then(|o| o.key));
+}
+let ids: Vec<_> = claimed.events.iter().filter_map(|e| e.event_id.clone()).collect();
+ees.ack_events("invoice-import", &ids).await?;
+```
+
+A subscriber is a durable *name*: instances sharing it split the events between them, and
+different names each get their own copy. The filter is applied where events are published, so a
+subscriber only accumulates what it asked for. An event that is claimed but never acknowledged
+comes back after its visibility timeout.
+
+With the `ws` feature, `ees.event_stream()` opens the gateway's WebSocket, and `EventListener`
+(`builder().ees(..).stream(..).name(..).handler(..)`) is told when something is waiting, claims
+it, runs your async handler and acknowledges only what was handled; `DeliveryMode::Live` hands
+pushed events straight to the handler. The stream reconnects with backoff and registers its
+subscriptions again.
+
+### EAD audit trail
+
+```rust
+use euclid_rdk::ead::*;
+
+let ead = session.ead();                      // or Euclid::for_server(url).ead().await?
+let page = ead.list_events(&ListEventsRequest {
+    module: Some("esm".into()), page_size: 50, ..Default::default()
+}).await?;                                    // newest first
+let exact = ead.count_events(&CountEventsRequest { user_id: Some("jens".into()), ..Default::default() }).await?;
+let removed = ead.purge_events(90).await?;    // entries older than 90 days
+```
+
+Every read is confined to the caller's own account. `list_events` counts its `total` only up to
+100 000 - `total_exact: false` means "at least this many"; `count_events` gives the real number.
+`purge_events(0)` is refused with 400 rather than empty the trail.
+
+### EMM module manager
+
+```rust
+use euclid_rdk::emm::*;
+
+let emm = session.emm();                      // administrator-only: others get 403
+let modules = emm.list_modules().await?;      // limits, desired state and instance pools
+emm.set_instances("esm", 1, 4).await?;        // or set_instances_with to change one limit only
+emm.set_threads("esm", 16).await?;            // applied by cycling the instances
+emm.set_log_level("esm", "debug").await?;     // "default" goes back to the configured level
+emm.restart_module("esm").await?;
+
+let document = emm.export_with(&ExportRequest {
+    all: true, passphrase: Some("open sesame".into()), ..Default::default()
+}).await?;                                    // sealed: the same file euclid-cli writes
+emm.import_with(&ImportRequest {
+    document, passphrase: Some("open sesame".into()), ..Default::default()
+}).await?;
+emm.create_backup(None).await?;               // runs in the background; see list_backups
+```
+
+The control actions record desired state; the manager reconciles within a few seconds, so an
+answer describes the pool before the change. Only core modules can be started and stopped here
+(`start_module`/`stop_module`), and `emm` cannot stop itself. Exporting `ekm` requires a passphrase.
+`import_with` checks the document locally first: a sealed one needs its passphrase, a plain one
+must not get one. Passphrases print as `<redacted>` in `Debug`.
+
 ### Errors
 
 Every call returns `euclid_rdk::Result<T>`. `Error::Authentication` is a rejected login,
@@ -366,6 +443,9 @@ EUCLID_URL=https://localhost:5566 cargo run --example ekm                # read-
 EUCLID_URL=https://localhost:5566 cargo run --example ets [-- <id>]      # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example eag                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example eap                # read-only
+EUCLID_URL=https://localhost:5566 cargo run --example ees                # read-only
+EUCLID_URL=https://localhost:5566 cargo run --example ead [-- <module>]  # read-only
+EUCLID_URL=https://localhost:5566 cargo run --example emm                # read-only
 EUCLID_URL=https://localhost:5566 cargo run --example invoke -- eqs list-queues '{"pageSize":3}'
 ```
 
@@ -375,12 +455,13 @@ All but `login` use the cached session.
 
 `tests/live*.rs` run round trips against a real server: EQS send/receive/delete, ESM objects and
 a 12 MiB multipart transfer, ENS publish fanned out to a subscribed queue, EKV put/get/query/scan,
-an ESS secret lifecycle, and EKM keys (encrypt/decrypt) and certificates. Each creates uniquely named `rdk-live-*` resources and deletes them again, also when a check
+an ESS secret lifecycle, EKM keys (encrypt/decrypt) and certificates, and EES events
+(HTTP claim/ack and, with `--features ws`, the WebSocket stream). Each creates uniquely named `rdk-live-*` resources and deletes them again, also when a check
 fails - except EKM keys, whose deletion the server only schedules (the
 live test uses a 1-day window). Ignored by default:
 
 ```sh
-EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live --test live_ens --test live_ekv --test live_ess --test live_ekm -- --ignored --nocapture
+EUCLID_LIVE_URL=https://localhost:5566 cargo test --test live --test live_ens --test live_ekv --test live_ess --test live_ekm --test live_ees --features ws -- --ignored --nocapture
 ```
 
 ## TLS

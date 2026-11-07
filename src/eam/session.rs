@@ -6,11 +6,13 @@ use serde_json::{json, Value};
 
 use super::model::*;
 use crate::credentials::{self, CachedCredentials};
+use crate::ead::Ead;
 use crate::eag::Eag;
 use crate::eap::Eap;
 use crate::ees::Ees;
 use crate::ekm::Ekm;
 use crate::ekv::Ekv;
+use crate::emm::Emm;
 use crate::emo::Emo;
 use crate::ens::Ens;
 use crate::eqs::Eqs;
@@ -216,6 +218,17 @@ impl Session {
         Eag::new(self.service("eag"))
     }
 
+    /// EAD (audit) operations for this session: the account's audit trail.
+    pub fn ead(&self) -> Ead {
+        Ead::new(self.service("ead"))
+    }
+
+    /// EMM (module manager) operations for this session: module pools, backups, export and
+    /// import. Administrator-only server-side: a non-admin session gets 403 from every action.
+    pub fn emm(&self) -> Emm {
+        Emm::new(self.service("emm"))
+    }
+
     /// ESM (object storage) operations for this session.
     pub fn esm(&self) -> Esm {
         Esm::new(self.service("esm"))
@@ -236,6 +249,78 @@ impl Session {
             credentials::update_namespace(path, &self.base_url, self.namespace());
         }
         Ok(())
+    }
+
+    /// Makes `account` - an account id, or an account's name - the account this session works in:
+    /// every later request carries it in `x-euclid-account-id`. It has to be one
+    /// [`list_my_accounts`](Self::list_my_accounts) names (the home account, or one a grant held by
+    /// the user or one of their groups covers); an id wins where a name would match another
+    /// account.
+    ///
+    /// Switching to a different account clears the active namespace, since a namespace belongs to
+    /// an account - choose one in the new account with [`change_namespace`](Self::change_namespace).
+    /// Module clients obtained before the switch keep the old account. The credentials cache is
+    /// updated.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] naming the user's accounts if `account` is not one of them; the
+    /// session is left as it was.
+    pub async fn switch_account(&mut self, account: &str) -> Result<()> {
+        let mine = self.list_my_accounts().await?;
+        let account_id = resolve_account(&mine, account)?;
+        if self.creds.account_id.as_deref() != Some(account_id.as_str()) {
+            self.creds.account_id = Some(account_id);
+            self.creds.namespace = None;
+        }
+        self.sync_cache();
+        Ok(())
+    }
+
+    /// Renews this session before its token runs out: the server hands back a fresh token (and the
+    /// same access key), and this session adopts it. The account and namespace in use are kept.
+    /// An expired token cannot be renewed - log in again instead. Module clients obtained before
+    /// the refresh keep presenting the old token. The credentials cache is updated.
+    pub async fn refresh_session(&mut self) -> Result<()> {
+        let login: LoginResponse = self.eam("refresh-session", &json!({})).await?;
+        let Some(token) = login.token.filter(|t| !t.is_empty()) else {
+            return Err(Error::service(
+                "eam",
+                "refresh-session",
+                200,
+                "the answer carried no token",
+            ));
+        };
+        self.creds.token = Some(token);
+        if login.access_key_id.is_some() {
+            self.creds.access_key_id = login.access_key_id;
+            self.creds.secret_access_key = login.secret_access_key;
+        }
+        self.creds.is_admin = login.is_admin;
+        if let Some(metadata) = login.metadata {
+            if metadata.user.is_some() {
+                self.creds.user_id = metadata.user;
+            }
+            if metadata.region.is_some() {
+                self.creds.region = metadata.region;
+            }
+            // metadata.accountId is the home account; an account switched to stays in use.
+            if self.creds.account_id.is_none() {
+                self.creds.account_id = metadata.account_id;
+            }
+        }
+        self.sync_cache();
+        Ok(())
+    }
+
+    /// Rewrites the credentials cache from this session, if what is cached is for this server.
+    /// Best-effort, like the namespace update: a cache that cannot be written means the next
+    /// process logs in again, not that the call failed.
+    fn sync_cache(&self) {
+        let Some(path) = &self.credentials_path else { return };
+        if credentials::load(path).and_then(|c| c.base_url).as_deref() == Some(self.base_url.as_str()) {
+            let _ = credentials::store(path, &self.to_cached());
+        }
     }
 
     /// Forgets the cached credentials for this server, so the next `login()` has to authenticate
@@ -295,6 +380,40 @@ impl Session {
             ..Default::default()
         };
         self.eam_unit("change-password", &request).await
+    }
+
+    /// Gives a user a different user ID. Requires administrator privileges.
+    ///
+    /// Both ids are named outright, even to rename yourself. The user's ERN, grants and group
+    /// memberships move with the name; access keys stay valid. Sessions already open - this one
+    /// included, if it renamed itself - keep working until their token expires and cannot be
+    /// refreshed afterwards, so log in again under the new id.
+    ///
+    /// Returns the renamed user, so the new ERN can be read rather than built. The server refuses
+    /// with 400 (missing or identical ids), 403, 404 (no such user) or 409 (the new id is taken,
+    /// or an application runs as this user - point it elsewhere with `update_application` first).
+    pub async fn change_userid(&self, user_id: &str, new_user_id: &str) -> Result<User> {
+        let request = ChangeUserIdRequest {
+            user_id: user_id.into(),
+            new_user_id: new_user_id.into(),
+        };
+        self.eam_field("change-userid", &request, "user").await
+    }
+
+    /// Gives a user a different email address. Requires administrator privileges.
+    ///
+    /// The user is always named, since an address is a way in (login accepts it in place of the
+    /// user id). Nothing else about the user changes, and open sessions keep working. An address
+    /// cannot be cleared this way.
+    ///
+    /// Returns the user as stored. The server refuses with 400 (missing value, not an address, or
+    /// the address the user already has), 403, 404 or 409 (another user holds the address).
+    pub async fn change_email(&self, user_id: &str, email: &str) -> Result<User> {
+        let request = ChangeEmailRequest {
+            user_id: user_id.into(),
+            email: email.into(),
+        };
+        self.eam_field("change-email", &request, "user").await
     }
 
     // -----------------------------------------------------------------------------------------
@@ -387,6 +506,13 @@ impl Session {
         self.eam("list-accounts", request).await
     }
 
+    /// The accounts this session's user may work in, and which of them is their home account.
+    /// Unlike [`list_accounts`](Self::list_accounts) this is not administrator-only and not paged.
+    /// [`switch_account`](Self::switch_account) picks one of them.
+    pub async fn list_my_accounts(&self) -> Result<ListMyAccountsResponse> {
+        self.eam("list-my-accounts", &json!({})).await
+    }
+
     pub async fn delete_account(&self, account_id: &str) -> Result<()> {
         self.eam_unit("delete-account", &json!({ "accountId": account_id }))
             .await
@@ -462,4 +588,29 @@ impl Session {
     pub async fn delete_role(&self, name: &str) -> Result<()> {
         self.eam_unit("delete-role", &json!({ "name": name })).await
     }
+}
+
+/// The account id `wanted` names among `mine`, or an error listing the user's accounts the way
+/// `euclid-cli eam login --account` does.
+pub(crate) fn resolve_account(mine: &ListMyAccountsResponse, wanted: &str) -> Result<String> {
+    if let Some(id) = mine.resolve(wanted) {
+        return Ok(id.to_owned());
+    }
+    let known: Vec<String> = mine
+        .accounts
+        .iter()
+        .filter_map(|a| {
+            let id = a.account_id.as_deref()?;
+            Some(match a.name.as_deref().filter(|n| !n.is_empty() && *n != id) {
+                Some(name) => format!("{id} ({name})"),
+                None => id.to_owned(),
+            })
+        })
+        .collect();
+    let mut message = format!("'{wanted}' is not an account you may work in");
+    if !known.is_empty() {
+        message.push_str("; yours are: ");
+        message.push_str(&known.join(", "));
+    }
+    Err(Error::invalid(message))
 }

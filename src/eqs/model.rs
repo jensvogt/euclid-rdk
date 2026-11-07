@@ -62,6 +62,8 @@ pub struct Queue {
     pub visibility: u64,
     #[serde(default = "default_max_message_length", deserialize_with = "lenient_u64")]
     pub max_message_length: u64,
+    /// Receives after which a message moves to the dead letter queue - what `create-queue` calls
+    /// `maxRetries` and [`Eqs::set_queue_max_retries`](super::Eqs::set_queue_max_retries) changes.
     #[serde(default = "default_max_receive_count", deserialize_with = "lenient_u64")]
     pub max_receive_count: u64,
     #[serde(default)]
@@ -222,6 +224,28 @@ pub struct SetQueueMaxMessageLengthResponse {
     pub max_message_length: u64,
     #[serde(deserialize_with = "lenient_u64")]
     pub effective_max_message_length: u64,
+}
+
+/// Answer to `set-queue-max-retries`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetQueueMaxRetriesResponse {
+    pub ern: Option<String>,
+    /// The queue's limit as stored (its `max_receive_count`).
+    #[serde(deserialize_with = "lenient_u64")]
+    pub max_retries: u64,
+}
+
+/// Answer to `purge-queue`. With `async` the purge is only accepted, and `messages` says how many
+/// were available when it was; without it the queue is already empty and `messages` is 0.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PurgeQueueResponse {
+    pub ern: Option<String>,
+    #[serde(rename = "async")]
+    pub is_async: bool,
+    #[serde(deserialize_with = "lenient_u64")]
+    pub messages: u64,
 }
 
 /// Message counts of a queue.

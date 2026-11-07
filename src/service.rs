@@ -85,6 +85,18 @@ impl ServiceClient {
         self
     }
 
+    /// The server's base URL, without a trailing slash.
+    #[cfg_attr(not(feature = "ws"), allow(dead_code))]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// The extra CA certificate the HTTP client trusts, if any.
+    #[cfg_attr(not(feature = "ws"), allow(dead_code))]
+    pub fn ca_cert_path(&self) -> Option<&std::path::Path> {
+        self.http.ca_cert_path()
+    }
+
     pub fn identity(&self) -> &Identity {
         &self.identity
     }

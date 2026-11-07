@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::serde_util::lenient_string;
+use crate::serde_util::{lenient_string, lenient_u64};
 
 // ---------------------------------------------------------------------------------------------
 // Enums
@@ -56,6 +56,53 @@ impl Serialize for RouteAuthentication {
 }
 
 impl<'de> Deserialize<'de> for RouteAuthentication {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(lenient_string(d)?
+            .map(|v| Self::from_wire_value(&v))
+            .unwrap_or_default())
+    }
+}
+
+/// What the API gateway does with a request a route matches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum RouteType {
+    /// Forwards it to an application or to one action of a euclid module. What the server
+    /// assumes when a create names no type.
+    Proxy,
+    /// Is the endpoint itself: stores the request body as an object in an ESM bucket (see
+    /// [`UploadSpec`]).
+    Upload,
+    /// Anything this client does not know, or none given.
+    #[default]
+    Unknown,
+}
+
+impl RouteType {
+    /// The spelling on the wire: `PROXY`, `UPLOAD`, `UNKNOWN`.
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            Self::Proxy => "PROXY",
+            Self::Upload => "UPLOAD",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+
+    /// Reads a wire value case-insensitively; anything unrecognized is [`Unknown`](Self::Unknown).
+    pub fn from_wire_value(value: &str) -> Self {
+        [Self::Proxy, Self::Upload]
+            .into_iter()
+            .find(|t| t.wire_value().eq_ignore_ascii_case(value))
+            .unwrap_or(Self::Unknown)
+    }
+}
+
+impl Serialize for RouteType {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.wire_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for RouteType {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Ok(lenient_string(d)?
             .map(|v| Self::from_wire_value(&v))
@@ -123,6 +170,13 @@ pub struct Route {
     pub namespace: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
+    /// Whether the route forwards ([`RouteType::Proxy`]) or stores uploads
+    /// ([`RouteType::Upload`]); [`RouteType::Unknown`] from a server that predates route types.
+    #[serde(default, rename = "type")]
+    pub kind: RouteType,
+    /// Where an upload route stores what it receives; all empty on a proxy route.
+    #[serde(default)]
+    pub upload: UploadSpec,
     #[serde(default)]
     pub application_id: Option<String>,
     #[serde(default)]
@@ -134,6 +188,10 @@ pub struct Route {
     pub methods: Vec<String>,
     #[serde(default)]
     pub authentication: RouteAuthentication,
+    /// Seconds the gateway gives the backend before giving up on a request; 0 for the gateway's
+    /// default.
+    #[serde(default, deserialize_with = "lenient_u64")]
+    pub timeout: u64,
     /// Whether the route is in service; `true` when the server leaves it out.
     #[serde(default = "default_true")]
     pub active: bool,
@@ -156,6 +214,25 @@ impl Route {
     }
 }
 
+/// Where an upload route puts what it receives, and what it accepts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UploadSpec {
+    /// ERN of the ESM bucket objects are written to.
+    pub bucket: Option<String>,
+    /// Prefix every key is confined to, or empty for the whole bucket.
+    pub key_prefix: Option<String>,
+    /// Largest body accepted, in bytes; 0 is no limit beyond the listener's.
+    #[serde(deserialize_with = "lenient_u64")]
+    pub max_bytes: u64,
+    /// Bytes per part streamed to ESM, and the size under which a body is stored with a single
+    /// put instead of a multipart upload.
+    #[serde(deserialize_with = "lenient_u64")]
+    pub part_size: u64,
+    /// Content types accepted; empty for any.
+    pub content_types: Vec<String>,
+}
+
 /// Body of `create-route` and `update-route`. Fields left `None` are not sent: on create the
 /// server applies its defaults, on update they stay as they are. `route_id` names the route.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -165,6 +242,9 @@ pub struct RouteRequest {
     pub route_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// [`RouteType::Proxy`] (the server's default on create) or [`RouteType::Upload`].
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<RouteType>,
     /// Forward to this application...
     #[serde(skip_serializing_if = "Option::is_none")]
     pub application_id: Option<String>,
@@ -184,6 +264,26 @@ pub struct RouteRequest {
     pub authentication: Option<RouteAuthentication>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<bool>,
+    /// Seconds the gateway gives the backend, 0..=3600; 0 for the gateway's default. Anything else
+    /// is refused with 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Upload routes only: ERN of the ESM bucket to store into (404 if there is none). Required
+    /// for, and only accepted on, a [`RouteType::Upload`] route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+    /// Upload routes only: prefix every key is confined to; empty for the whole bucket.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_prefix: Option<String>,
+    /// Upload routes only: largest body accepted, in bytes; 0 is no limit beyond the listener's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    /// Upload routes only: bytes per multipart part; the server defaults to 5 MiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part_size: Option<u64>,
+    /// Upload routes only: content types accepted; empty for any. Replaces the list on update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_types: Option<Vec<String>>,
 }
 
 /// Body of `create-route`.

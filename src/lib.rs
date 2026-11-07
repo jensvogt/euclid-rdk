@@ -23,12 +23,14 @@
 
 pub mod auth;
 pub mod credentials;
+pub mod ead;
 pub mod eag;
 pub mod eam;
 pub mod eap;
 pub mod ees;
 pub mod ekm;
 pub mod ekv;
+pub mod emm;
 pub mod emo;
 pub mod ens;
 pub mod eqs;
@@ -41,12 +43,14 @@ mod serde_util;
 mod service;
 mod variant;
 
+pub use ead::Ead;
 pub use eag::Eag;
 pub use eam::{Eam, Session};
 pub use eap::Eap;
 pub use ees::Ees;
 pub use ekm::Ekm;
 pub use ekv::Ekv;
+pub use emm::Emm;
 pub use emo::Emo;
 pub use ens::Ens;
 pub use eqs::Eqs;
@@ -138,5 +142,15 @@ impl Euclid {
     /// EES operations using the cached session for this server (see [`Euclid::session`]).
     pub async fn ees(&self) -> Result<Ees> {
         Ok(self.session().await?.ees())
+    }
+
+    /// EAD operations using the cached session for this server (see [`Euclid::session`]).
+    pub async fn ead(&self) -> Result<Ead> {
+        Ok(self.session().await?.ead())
+    }
+
+    /// EMM operations using the cached session for this server (see [`Euclid::session`]).
+    pub async fn emm(&self) -> Result<Emm> {
+        Ok(self.session().await?.emm())
     }
 }
