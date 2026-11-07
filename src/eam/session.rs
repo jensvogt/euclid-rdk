@@ -6,11 +6,13 @@ use serde_json::{json, Value};
 
 use super::model::*;
 use crate::credentials::{self, CachedCredentials};
+use crate::ead::Ead;
 use crate::eag::Eag;
 use crate::eap::Eap;
 use crate::ees::Ees;
 use crate::ekm::Ekm;
 use crate::ekv::Ekv;
+use crate::emm::Emm;
 use crate::emo::Emo;
 use crate::ens::Ens;
 use crate::eqs::Eqs;
@@ -214,6 +216,17 @@ impl Session {
     /// listeners it publishes them on. Administrator-only server-side, like ETS.
     pub fn eag(&self) -> Eag {
         Eag::new(self.service("eag"))
+    }
+
+    /// EAD (audit) operations for this session: the account's audit trail.
+    pub fn ead(&self) -> Ead {
+        Ead::new(self.service("ead"))
+    }
+
+    /// EMM (module manager) operations for this session: module pools, backups, export and
+    /// import. Administrator-only server-side: a non-admin session gets 403 from every action.
+    pub fn emm(&self) -> Emm {
+        Emm::new(self.service("emm"))
     }
 
     /// ESM (object storage) operations for this session.
