@@ -42,6 +42,29 @@ impl Eag {
         .await
     }
 
+    /// Publishes `path` as an upload endpoint: a request body sent there is stored as an object in
+    /// the ESM bucket `bucket_ern`. An upload route has to require authentication -
+    /// [`RouteAuthentication::Euclid`] or [`RouteAuthentication::Basic`]; `None` is refused with
+    /// 400. Use [`create_route_with`](Self::create_route_with) for a key prefix, size limit or
+    /// content types.
+    pub async fn create_upload_route(
+        &self,
+        route_id: &str,
+        path: &str,
+        bucket_ern: &str,
+        authentication: RouteAuthentication,
+    ) -> Result<Route> {
+        self.create_route_with(&RouteRequest {
+            route_id: Some(route_id.into()),
+            path: Some(path.into()),
+            kind: Some(RouteType::Upload),
+            bucket: Some(bucket_ern.into()),
+            authentication: Some(authentication),
+            ..Default::default()
+        })
+        .await
+    }
+
     /// Publishes `path` and forwards it to one action of a euclid module - e.g. EAM `login` for a
     /// browser front end, so it needs only one origin instead of two plus CORS.
     pub async fn create_module_route(

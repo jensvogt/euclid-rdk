@@ -48,6 +48,11 @@ pub struct TransferServer {
     pub user_ids: Vec<String>,
     /// EAM user groups whose members may log in.
     pub user_groups: Vec<String>,
+    /// How many people may log in: the union of `user_ids` and the members of `user_groups`,
+    /// each counted once (a group that does not exist admits nobody). 0 from a server that
+    /// predates the figure.
+    #[serde(deserialize_with = "lenient_u64")]
+    pub user_count: u64,
     /// Directories every session finds under its home, created at login.
     pub directories: Vec<String>,
     /// `"RUNNING"` or `"STOPPED"` as last asked for.

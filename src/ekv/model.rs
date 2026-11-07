@@ -246,6 +246,55 @@ pub struct QueryResponse {
     pub items: Vec<Item>,
     /// Items returned; the server's figure, or the number of items when it sends none.
     pub count: u64,
+    /// Items matching the query across all pages - what tells a caller paging through a partition
+    /// that there is a page after this one. Falls back to `count` from a server that sends none.
+    pub total: u64,
+}
+
+/// Body of `scan`: a table's items regardless of their key, optionally narrowed by when they were
+/// last written and by a condition on any one attribute. A page size of 0 returns every match.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRequest {
+    pub table: String,
+    pub page_size: u64,
+    pub page_index: u64,
+    /// What to order by: `pk`, `sk` or `modified`. Anything else, the empty string included, is
+    /// key order.
+    pub sort_column: String,
+    pub sort_direction: SortDirection,
+    /// ISO-8601 lower bound on when an item was last written; empty for none.
+    pub modified_from: String,
+    /// ISO-8601 upper bound on when an item was last written; empty for none.
+    pub modified_to: String,
+    /// An attribute to compare (any attribute, not only a key), or empty for none.
+    pub attribute_name: String,
+    /// How to compare it, in the vocabulary a query uses for the sort key.
+    /// [`SortOperator::None`] narrows nothing.
+    pub attribute_operator: SortOperator,
+    /// Operand of the attribute condition; the lower bound for [`SortOperator::Between`]. Typed as
+    /// written, so a number compares as a number.
+    pub attribute_value: Value,
+    /// Upper bound for [`SortOperator::Between`].
+    pub attribute_upper: Value,
+}
+
+impl Default for ScanRequest {
+    fn default() -> Self {
+        Self {
+            table: String::new(),
+            page_size: 0,
+            page_index: 0,
+            sort_column: String::new(),
+            sort_direction: SortDirection::Asc,
+            modified_from: String::new(),
+            modified_to: String::new(),
+            attribute_name: String::new(),
+            attribute_operator: SortOperator::None,
+            attribute_value: Value::Null,
+            attribute_upper: Value::Null,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -263,6 +312,5 @@ pub struct ScanResponse {
 pub(crate) struct RawItems {
     pub items: Vec<Item>,
     pub count: Option<u64>,
-    #[serde(deserialize_with = "lenient_u64")]
-    pub total: u64,
+    pub total: Option<u64>,
 }
