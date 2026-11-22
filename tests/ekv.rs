@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use euclid_rdk::ekv::{
-    CreateTableRequest, KeyType, ListTablesRequest, QueryRequest, ScanRequest, SortDirection, SortOperator,
+    CreateTableRequest, KeyType, ListTablesRequest, MatchType, QueryRequest, ScanRequest, SortDirection, SortOperator,
 };
 use euclid_rdk::{Eam, Ekv, Error};
 use serde::Serialize;
@@ -172,6 +172,29 @@ async fn list_and_delete_tables() {
 
     assert_eq!(ekv.delete_table("orders").await.unwrap(), 42);
     assert_eq!(body(&delete), json!({ "name": "orders" }));
+}
+
+#[tokio::test]
+async fn list_tables_sends_the_match_type_when_set() {
+    let server = MockServer::start().await;
+    let ekv = ekv(&server, true).await;
+    let list = mount(&server, "list-tables", json!({ "tables": [table_json()], "total": 1 })).await;
+
+    let tables = ekv
+        .list_tables(&ListTablesRequest {
+            prefix: "ders".into(),
+            match_type: Some(MatchType::EndsWith),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        body(&list),
+        json!({ "prefix": "ders", "matchType": "endsWith", "pageSize": 10, "pageIndex": 0,
+                "sortColumn": "name", "sortDirection": "asc" })
+    );
+    assert_eq!(tables.tables[0].name.as_deref(), Some("orders"));
+    assert_eq!(tables.total, 1);
 }
 
 #[tokio::test]
@@ -341,8 +364,14 @@ async fn scan_pages_and_reports_totals() {
     )
     .await;
 
+    // Unnarrowed has to be said explicitly: no attribute, no operator, no time window, key order.
     let page = ekv.scan("orders", 2, 3).await.unwrap();
-    assert_eq!(body(&seen), json!({ "table": "orders", "pageSize": 2, "pageIndex": 3 }));
+    assert_eq!(
+        body(&seen),
+        json!({ "table": "orders", "pageSize": 2, "pageIndex": 3, "sortColumn": "", "sortDirection": "asc",
+                "modifiedFrom": "", "modifiedTo": "", "attributeName": "", "attributeOperator": "",
+                "attributeValue": null, "attributeUpper": null })
+    );
     assert_eq!(page.count, 2);
     assert_eq!(page.total, 9);
     assert_eq!(page.items[1].get("id"), Some(&json!(2)));

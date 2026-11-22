@@ -223,8 +223,13 @@ Items and keys are plain JSON objects, so a `json!` value or any `Serialize` str
 server's `_created`/`_modified` attributes come back as `Item::created`/`Item::modified`. Key types
 default to `string`; `create_table_with(&CreateTableRequest { .. })` sets `KeyType::Number` or
 `KeyType::Binary`. `query_with(&QueryRequest { .. })` adds `SortOperator::Between` (with
-`sort_upper`), descending order (`forward: false`) and paging. Also: `list_tables`, `get_table`,
-`exists_table`, `delete_item` and `delete_table`. A missing item is a 404 `Error::Service`.
+`sort_upper`), descending order (`forward: false`) and paging; its `total` counts every match
+across pages. `scan_with(&ScanRequest { .. })` orders by `pk`/`sk`/`modified` and narrows by a
+`modified_from`/`modified_to` window or by `attribute_name`/`attribute_operator`/`attribute_value`
+on any attribute - the scan's `total` still counts the whole table, so page until a short page.
+`list_tables` matches names with `match_type: Some(MatchType::EndsWith | Contains | Regex)` as well
+as by prefix. Also: `get_table`, `exists_table`, `delete_item` and `delete_table`. A missing item
+is a 404 `Error::Service`.
 
 ### ESS secrets
 
