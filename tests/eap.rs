@@ -777,7 +777,7 @@ async fn list_applications_can_match_other_than_a_prefix() {
     let found = eap
         .list_applications_with(&ListApplicationsRequest {
             prefix: "ill".into(),
-            match_type: Some("contains".into()),
+            match_type: Some(euclid_rdk::MatchType::Contains),
         })
         .await
         .unwrap();

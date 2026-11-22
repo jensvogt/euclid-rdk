@@ -4,6 +4,7 @@
 //! the server leaves out reads as `None`/empty instead of failing the whole response. Request
 //! fields left `None` are omitted from the body, as euclid-jdk does.
 
+use crate::MatchType;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::serde_util::{lenient_string, lenient_u64};
@@ -325,10 +326,10 @@ pub struct ListRoutesRequest {
     /// The text paths are matched against; empty returns every route. Only a prefix under the
     /// default match type.
     pub prefix: String,
-    /// `"prefix"`, `"endsWith"`, `"contains"` or `"regex"`; `None` is not sent and means
-    /// `"prefix"`, as every listing did before the field existed.
+    /// How `prefix` is matched; `None` is not sent and means [`MatchType::Prefix`], as every
+    /// listing did before the field existed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub match_type: Option<String>,
+    pub match_type: Option<MatchType>,
 }
 
 /// Body of `create-route`.

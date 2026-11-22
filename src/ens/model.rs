@@ -3,6 +3,7 @@
 //! Field names are the wire names in camelCase. Response types default every field, so a field
 //! the server leaves out reads as `None`/zero instead of failing the whole response.
 
+use crate::MatchType;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -103,11 +104,11 @@ impl Topic {
 pub struct ListTopicsRequest {
     /// The text topic names are matched against; empty matches every topic.
     pub prefix: String,
-    /// How `prefix` is matched: `"prefix"`, `"endsWith"`, `"contains"` or `"regex"` (an
-    /// ECMAScript regular expression). Empty, the default, leaves it to the server, which reads it
-    /// as `"prefix"`. An invalid regular expression or an unknown match type is refused with HTTP
-    /// 400 rather than matching nothing, so a typo cannot pass for an account without topics.
-    pub match_type: String,
+    /// How `prefix` is matched against the names; `None` (the default) is
+    /// [`MatchType::Prefix`]. A regular expression the server cannot compile is refused with
+    /// HTTP 400 rather than quietly matching nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -118,7 +119,7 @@ impl Default for ListTopicsRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
-            match_type: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),

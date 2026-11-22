@@ -176,7 +176,7 @@ async fn list_and_exists() {
     let listing = ess.list_secrets(&ListSecretsRequest::default()).await.unwrap();
     assert_eq!(
         body(&seen),
-        json!({ "prefix": "", "matchType": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
+        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
                 "sortDirection": "asc" })
     );
     assert_eq!(listing.total, 1);
@@ -185,8 +185,8 @@ async fn list_and_exists() {
     assert!(ess.exists_secret("db-password").await.unwrap());
     assert_eq!(body(&seen)["prefix"], "db-password");
     assert_eq!(body(&seen)["pageSize"], 0);
-    // exists_secret stays a prefix match: an empty matchType is what the server reads as one.
-    assert_eq!(body(&seen)["matchType"], "");
+    // exists_secret stays a prefix match: no matchType is what the server reads as one.
+    assert!(body(&seen).get("matchType").is_none());
     // A prefix match is not an exact match.
     assert!(!ess.exists_secret("db-pass").await.unwrap());
 }
@@ -275,7 +275,7 @@ async fn list_secrets_sends_the_match_type() {
     let listing = ess
         .list_secrets(&ListSecretsRequest {
             prefix: "password".into(),
-            match_type: "contains".into(),
+            match_type: Some(euclid_rdk::MatchType::Contains),
             ..Default::default()
         })
         .await

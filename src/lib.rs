@@ -40,6 +40,7 @@ pub mod esm;
 pub mod ess;
 pub mod ets;
 mod http;
+mod match_type;
 mod serde_util;
 mod service;
 mod variant;
@@ -60,6 +61,7 @@ pub use error::{Error, Result};
 pub use esm::Esm;
 pub use ess::Ess;
 pub use ets::Ets;
+pub use match_type::MatchType;
 pub use variant::Variant;
 
 /// Main entry point for talking to an Euclid server, e.g.

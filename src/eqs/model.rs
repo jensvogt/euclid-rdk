@@ -3,6 +3,7 @@
 //! Field names are the wire names in camelCase. Response types default every field, so a field
 //! the server leaves out reads as `None`/zero instead of failing the whole response.
 
+use crate::MatchType;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -103,13 +104,11 @@ pub struct ListQueuesRequest {
     /// The text queue names are matched against, the way `match_type` says; empty matches every
     /// queue.
     pub prefix: String,
-    /// How `prefix` is matched: `"prefix"`, `"endsWith"`, `"contains"` or `"regex"`. Empty, the
-    /// default, leaves it to the server, which reads it as `"prefix"`. Every type but `"regex"`
-    /// takes the text literally. Named by the server rather than by an enum, so a match type a
-    /// newer server adds can be asked for straight away; one the server does not know, or a
-    /// regular expression it cannot compile, is refused with HTTP 400 rather than quietly treated
-    /// as a prefix.
-    pub match_type: String,
+    /// How `prefix` is matched against the names; `None` (the default) is
+    /// [`MatchType::Prefix`]. A regular expression the server cannot compile is refused with
+    /// HTTP 400 rather than quietly matching nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -122,7 +121,7 @@ impl Default for ListQueuesRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
-            match_type: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),

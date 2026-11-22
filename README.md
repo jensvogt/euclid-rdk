@@ -160,8 +160,8 @@ and trusts a zero only for 10 s (`zero_count_trust`). Also: `list_queues`, `get_
 `redrive_dlq`, tags, message attributes and `update_message_body`. Queue names resolve within the
 session's namespace; an ERN always works.
 
-`ListQueuesRequest::match_type` says how `prefix` is matched (`"prefix"`, the default when empty,
-`"endsWith"`, `"contains"` or `"regex"`); an unknown type or a bad regex is a 400. A service in the
+`ListQueuesRequest::match_type` says how `prefix` is matched (`MatchType::Prefix`, the default
+when unset, `EndsWith`, `Contains` or `Regex`); a bad regex is a 400. A service in the
 middle of a chain hands the received `Message::system_attributes` on in
 `SendMessageRequest::system_attributes`, so a correlation id identifies the whole chain.
 `delete_queue_if_empty` refuses (409) a queue that still holds messages or has deliveries on their
@@ -191,9 +191,9 @@ and `start_topic` releases the backlog. Also: `list_messages`/`get_message`/`get
 so subscribers must be idempotent), tags, `set_topic_max_message_length`, `purge_topic`, and
 `list_subscriptions`/`unsubscribe`.
 
-`ListTopicsRequest::match_type` says how `prefix` is matched (`"prefix"`, the default when empty,
-`"endsWith"`, `"contains"` or `"regex"`); the text is taken literally for all but `"regex"`, and an
-unknown type or a bad regex is a 400. `purge_topic_with(ern, true)` answers 202 at once with the
+`ListTopicsRequest::match_type` says how `prefix` is matched (`MatchType::Prefix`, the default
+when unset, `EndsWith`, `Contains` or `Regex`); the text is taken literally for all but `Regex`,
+and a bad regex is a 400. `purge_topic_with(ern, true)` answers 202 at once with the
 messages the topic held when the purge was taken on. `Topic::send`/`resend` are lifetime totals
 that, unlike `messages`, do not fall on a purge.
 
@@ -289,8 +289,8 @@ Secrets are encrypted under the namespace's EKM key unless `create_secret_with` 
 description, `None` leaves it alone. Listings never carry values, and `Debug` output of anything
 holding a value prints `<redacted>`. Also: `list_secrets`, `exists_secret`, `delete_secret` and
 `add_secret_tag`/`delete_secret_tag`. `ListSecretsRequest::match_type` says how `prefix` is matched
-(`"prefix"`, the default when empty, `"endsWith"`, `"contains"` or `"regex"`); an unknown type or
-a bad regex is a 400.
+(`MatchType::Prefix`, the default when unset, `EndsWith`, `Contains` or `Regex`); a bad regex is
+a 400.
 
 ### EKM keys and certificates
 
@@ -315,9 +315,9 @@ its ERN. `delete_key` only schedules deletion: the key stays `PENDING_DELETION` 
 (`create_certificate_with` for CN, SANs, validity, key size) or imported with their private key
 (`import_certificate`, redacted in `Debug`); only the public PEM comes back. Also: `list_keys`,
 `exists_key`, `add_key_tag`/`delete_key_tag`, `list_certificates`, `get_certificate`,
-`delete_certificate`. `ListKeysRequest`/`ListCertificatesRequest` carry a `match_type` (`"prefix"`,
-the default when empty, `"endsWith"`, `"contains"` or `"regex"`); an unknown type or a bad regex
-is a 400.
+`delete_certificate`. `ListKeysRequest`/`ListCertificatesRequest` carry a `match_type`
+(`MatchType::Prefix`, the default when unset, `EndsWith`, `Contains` or `Regex`); a bad regex is
+a 400.
 
 ### ETS transfer servers
 
@@ -342,7 +342,7 @@ EAM credentials and every upload becomes an object. It is created stopped; `star
 `update_server` sends only the fields that are set. `TransferServer::user_count` is how many
 people may log in (the union of `user_ids` and the groups' members). `list_servers` covers the
 session's namespace; `list_servers_with(&ListServersRequest { .. })` adds a `match_type`
-(`"prefix"`, `"endsWith"`, `"contains"`, `"regex"`). Also: `get_server`, `delete_server`. An
+(a `MatchType`). Also: `get_server`, `delete_server`. An
 unknown bucket is a 404, a port already in use a 409.
 
 ### EAG API gateway
@@ -365,7 +365,7 @@ into an ESM bucket itself. `update_route(&RouteRequest { .. })` changes only the
 the same struct with `create_route_with` sets methods, namespace, `RouteAuthentication`, `active`,
 a per-route backend `timeout` and an upload route's key prefix, size limit, part size and content
 types. `list_routes(prefix)` covers the session's namespace; `list_routes_with(&ListRoutesRequest
-{ .. })` adds a `match_type` (`"prefix"`, `"endsWith"`, `"contains"`, `"regex"`). `list_listeners`
+{ .. })` adds a `match_type` (a `MatchType`). `list_listeners`
 reports what is configured and, through `serving`, whether anything is bound. Also: `get_route`,
 `delete_route`.
 
@@ -393,7 +393,7 @@ deployment, so check its `error`. `update_application` changes only the fields t
 (including `namespace` to move the application and `user` to change its identity); setting any
 of the four resource lists replaces all of them. `redeploy_application` refuses a build
 byte-for-byte identical to the deployed one unless `force: Some(true)`. `list_applications_with`
-takes a `match_type` (`"prefix"`, `"endsWith"`, `"contains"`, `"regex"`). Also: `copy_application`
+takes a `match_type` (a `MatchType`). Also: `copy_application`
 (promote to another namespace), `scale_application`, `restart_application`/`rebalance_application`,
 log levels, infrastructure and platform declarations (`plan_*` changes nothing), and nodes -
 `drain_node`/`set_node_drained` and `assign_instance` to move a slot by hand. Environment values

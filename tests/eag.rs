@@ -405,7 +405,7 @@ async fn list_routes_sends_the_match_type_only_when_set() {
     let routes = eag
         .list_routes_with(&ListRoutesRequest {
             prefix: "/export".into(),
-            match_type: Some("endsWith".into()),
+            match_type: Some(euclid_rdk::MatchType::EndsWith),
         })
         .await
         .unwrap();

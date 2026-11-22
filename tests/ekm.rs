@@ -159,7 +159,7 @@ async fn list_and_get_keys_parse_and_address_by_name_or_ern() {
     let keys = ekm.list_keys(&ListKeysRequest::default()).await.unwrap();
     assert_eq!(
         body(&list),
-        json!({ "prefix": "", "matchType": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
+        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
                 "sortDirection": "asc" })
     );
     assert_eq!(keys.total, 1);
@@ -376,7 +376,7 @@ async fn list_keys_sends_the_match_type() {
     let listed = ekm
         .list_keys(&ListKeysRequest {
             prefix: "-prod".into(),
-            match_type: "endsWith".into(),
+            match_type: Some(euclid_rdk::MatchType::EndsWith),
             page_size: 50,
             ..Default::default()
         })
@@ -404,7 +404,7 @@ async fn list_certificates_sends_the_match_type() {
     let listed = ekm
         .list_certificates(&ListCertificatesRequest {
             prefix: "^c(1)?$".into(),
-            match_type: "regex".into(),
+            match_type: Some(euclid_rdk::MatchType::Regex),
             ..Default::default()
         })
         .await

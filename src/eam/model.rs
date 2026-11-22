@@ -668,25 +668,7 @@ pub struct SamlAcsRequest {
 // Misc
 // ---------------------------------------------------------------------------------------------
 
-/// How a listing's `prefix` is matched against the names it lists.
-///
-/// Every type but [`Regex`](Self::Regex) takes the text literally, so a search for `a.b` does not
-/// also find `aXb`; a pattern the server cannot use is refused with HTTP 400. Leaving the match
-/// type unset (`None`) means [`Prefix`](Self::Prefix), which is what every listing did before the
-/// choice existed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum MatchType {
-    /// Names starting with the text.
-    #[default]
-    Prefix,
-    /// Names ending with the text.
-    EndsWith,
-    /// Names containing the text anywhere.
-    Contains,
-    /// Names matching the text as a regular expression.
-    Regex,
-}
+pub use crate::MatchType;
 
 /// Sort order of a listing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -144,7 +144,7 @@ async fn list_servers_sends_the_match_type_only_when_set() {
     let found = ets
         .list_servers_with(&ListServersRequest {
             prefix: "inbound".into(),
-            match_type: Some("contains".into()),
+            match_type: Some(euclid_rdk::MatchType::Contains),
         })
         .await
         .unwrap();

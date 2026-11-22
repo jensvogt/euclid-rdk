@@ -4,6 +4,7 @@
 //! as euclid-jdk's non-null mapper does - on an update that means "keep the current value".
 //! Responses default every field, so one the server leaves out reads as `None`/zero/empty.
 
+use crate::MatchType;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -572,10 +573,10 @@ pub struct RedeployApplicationRequest {
 pub struct ListApplicationsRequest {
     /// The search text; empty lists every application. Only a prefix under the default match type.
     pub prefix: String,
-    /// `"prefix"`, `"endsWith"`, `"contains"` or `"regex"`; `None` is not sent and means
-    /// `"prefix"`, as every listing did before the field existed.
+    /// How `prefix` is matched; `None` is not sent and means [`MatchType::Prefix`], as every
+    /// listing did before the field existed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub match_type: Option<String>,
+    pub match_type: Option<MatchType>,
 }
 
 /// Answer to `restart-application`.

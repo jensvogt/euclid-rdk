@@ -8,8 +8,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 pub use crate::eam::SortDirection;
-pub use crate::esm::MatchType;
 use crate::serde_util::{lenient_string, lenient_u64};
+pub use crate::MatchType;
 
 const CREATED_ATTRIBUTE: &str = "_created";
 const MODIFIED_ATTRIBUTE: &str = "_modified";

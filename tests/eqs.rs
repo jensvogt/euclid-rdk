@@ -144,7 +144,7 @@ async fn list_queues_sends_defaults_and_parses_queues() {
     let response = eqs.list_queues(&ListQueuesRequest::default()).await.unwrap();
     assert_eq!(
         seen.lock().unwrap()[0],
-        json!({ "prefix": "", "matchType": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
+        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
                 "sortDirection": "asc", "includeInternal": false })
     );
     assert_eq!(response.total, 1);
@@ -598,7 +598,7 @@ async fn list_queues_carries_the_match_type() {
     let response = eqs
         .list_queues(&ListQueuesRequest {
             prefix: "-dlq".into(),
-            match_type: "endsWith".into(),
+            match_type: Some(euclid_rdk::MatchType::EndsWith),
             include_internal: true,
             ..Default::default()
         })

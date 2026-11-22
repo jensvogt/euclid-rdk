@@ -4,6 +4,7 @@
 //! the server keeps its default (create) or the current value (update) for those. Responses
 //! default every field, so one the server leaves out reads as `None`/zero/empty.
 
+use crate::MatchType;
 use serde::{Deserialize, Serialize};
 
 use crate::serde_util::{lenient_string, lenient_u64};
@@ -174,10 +175,10 @@ pub struct ListServersRequest {
     /// The text server IDs are matched against; empty returns every server. Only a prefix under
     /// the default match type.
     pub prefix: String,
-    /// `"prefix"`, `"endsWith"`, `"contains"` or `"regex"`; `None` is not sent and means
-    /// `"prefix"`, as every listing did before the field existed.
+    /// How `prefix` is matched; `None` is not sent and means [`MatchType::Prefix`], as every
+    /// listing did before the field existed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub match_type: Option<String>,
+    pub match_type: Option<MatchType>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

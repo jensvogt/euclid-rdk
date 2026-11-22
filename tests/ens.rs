@@ -117,7 +117,7 @@ async fn list_topics_sends_defaults_and_parses_topics() {
     let response = ens.list_topics(&ListTopicsRequest::default()).await.unwrap();
     assert_eq!(
         body(&seen),
-        json!({ "prefix": "", "matchType": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
+        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
                 "sortDirection": "asc" })
     );
     assert_eq!(response.total, 2);
@@ -496,7 +496,7 @@ async fn list_topics_sends_the_match_type_with_the_text() {
 
     ens.list_topics(&ListTopicsRequest {
         prefix: ".v1".into(),
-        match_type: "endsWith".into(),
+        match_type: Some(euclid_rdk::MatchType::EndsWith),
         ..Default::default()
     })
     .await
