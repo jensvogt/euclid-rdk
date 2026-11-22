@@ -190,7 +190,24 @@ esm.upload_file(&bucket, "big.iso", "/tmp/big.iso", &TransferOptions::default())
 esm.download_file(&bucket, "big.iso", "/tmp/copy.iso", &TransferOptions::default()).await?;
 
 let objects = esm.list_objects(&ListObjectsRequest { bucket_ern: bucket.clone(), ..Default::default() }).await?;
+
+// One level of the bucket, like a directory listing: the objects directly in "in/" and the
+// directories one step below it in `common_prefixes`.
+let level = esm.list_objects(&ListObjectsRequest {
+    bucket_ern: bucket.clone(), prefix: "in/".into(), delimiter: Some("/".into()), ..Default::default()
+}).await?;
+
+// Tidy up only if nothing is left: a bucket with objects in it is a 409, not emptied.
+esm.delete_objects_by_prefix(&bucket, "tmp/", false, true).await?;   // notify = false deletes silently
+esm.delete_bucket_if_empty(&bucket).await?;
 ```
+
+Listings of buckets and objects match `prefix` literally from the start by default;
+`match_type: Some(MatchType::EndsWith | Contains | Regex)` matches it otherwise, and
+`ListBucketsRequest::include_internal` lists euclid's internal buckets too (administrators only).
+`create_bucket_with(&CreateBucketRequest { internal: true, .. })` creates a bucket hidden from the
+start. `delete_objects` with no keys sends nothing - to the server that would mean the whole bucket.
+`set_bucket_versioning`/`set_bucket_max_versions` cap the non-current versions kept per key.
 
 Also available: bucket tags, priority, stop/start, encryption, rename/purge,
 `copy_object`/`move_object`/`rename_object`, object attributes (`Variant`), subscriptions
@@ -220,8 +237,13 @@ Items and keys are plain JSON objects, so a `json!` value or any `Serialize` str
 server's `_created`/`_modified` attributes come back as `Item::created`/`Item::modified`. Key types
 default to `string`; `create_table_with(&CreateTableRequest { .. })` sets `KeyType::Number` or
 `KeyType::Binary`. `query_with(&QueryRequest { .. })` adds `SortOperator::Between` (with
-`sort_upper`), descending order (`forward: false`) and paging. Also: `list_tables`, `get_table`,
-`exists_table`, `delete_item` and `delete_table`. A missing item is a 404 `Error::Service`.
+`sort_upper`), descending order (`forward: false`) and paging; its `total` counts every match
+across pages. `scan_with(&ScanRequest { .. })` orders by `pk`/`sk`/`modified` and narrows by a
+`modified_from`/`modified_to` window or by `attribute_name`/`attribute_operator`/`attribute_value`
+on any attribute - the scan's `total` still counts the whole table, so page until a short page.
+`list_tables` matches names with `match_type: Some(MatchType::EndsWith | Contains | Regex)` as well
+as by prefix. Also: `get_table`, `exists_table`, `delete_item` and `delete_table`. A missing item
+is a 404 `Error::Service`.
 
 ### ESS secrets
 

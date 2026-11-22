@@ -51,20 +51,42 @@ impl Esm {
 
     /// Creates a bucket. `priority` (e.g. `"HIGH"`) is left to the server's default when `None`.
     pub async fn create_bucket(&self, name: &str, priority: Option<&str>) -> Result<CreateBucketResponse> {
-        let mut body = json!({ "name": name });
-        if let Some(p) = priority.filter(|p| !p.is_empty()) {
-            body["priority"] = json!(p);
-        }
-        self.client.call("create-bucket", &body).await
+        self.create_bucket_with(&CreateBucketRequest {
+            name: name.into(),
+            priority: priority.filter(|p| !p.is_empty()).map(str::to_owned),
+            internal: false,
+        })
+        .await
+    }
+
+    /// Creates a bucket with every option of the request spelled out - including
+    /// [`internal`](CreateBucketRequest::internal), which creates it hidden from ordinary listings
+    /// from the start rather than [`set_bucket_internal`](Self::set_bucket_internal) afterwards.
+    /// A priority other than `LOW`, `MEDIUM` or `HIGH` is refused with 400.
+    pub async fn create_bucket_with(&self, request: &CreateBucketRequest) -> Result<CreateBucketResponse> {
+        self.client.call("create-bucket", request).await
     }
 
     /// Deletes a bucket and everything in it. With `run_async`, the server takes the deletion on
     /// as a background job and answers at once with its id.
     pub async fn delete_bucket(&self, ern: &str, run_async: bool) -> Result<DeleteBucketResponse> {
-        let value = self
-            .client
-            .call_value("delete-bucket", &json!({ "ern": ern, "async": run_async }))
-            .await?;
+        self.do_delete_bucket(ern, run_async, false).await
+    }
+
+    /// Deletes a bucket only if nothing is in it - what an automated caller means when it tidies
+    /// up after itself, as opposed to an operator who has decided the contents go too.
+    ///
+    /// A bucket that still holds anything (directory markers included) is refused with HTTP 409
+    /// naming how many objects remain, and nothing is deleted; an object that lands while the
+    /// bucket is being deleted puts the bucket back and is answered with 409 as well. A missing
+    /// bucket is a 404. The delete always runs inline, so the response is empty.
+    pub async fn delete_bucket_if_empty(&self, ern: &str) -> Result<DeleteBucketResponse> {
+        self.do_delete_bucket(ern, false, true).await
+    }
+
+    async fn do_delete_bucket(&self, ern: &str, run_async: bool, if_empty: bool) -> Result<DeleteBucketResponse> {
+        let body = json!({ "ern": ern, "async": run_async, "ifEmpty": if_empty });
+        let value = self.client.call_value("delete-bucket", &body).await?;
         // An inline delete answers 200 with no body at all.
         if value.is_null() {
             return Ok(DeleteBucketResponse::default());
@@ -72,6 +94,10 @@ impl Esm {
         Ok(serde_json::from_value(value)?)
     }
 
+    /// Lists buckets. Beyond paging and sorting, the request can match names other than by prefix
+    /// ([`match_type`](ListBucketsRequest::match_type)) and, for EAM administrators, include
+    /// euclid's internal buckets ([`include_internal`](ListBucketsRequest::include_internal)). An
+    /// unknown match type or a regex that does not compile is refused with 400.
     pub async fn list_buckets(&self, request: &ListBucketsRequest) -> Result<ListBucketsResponse> {
         self.client.call("list-buckets", request).await
     }
@@ -137,6 +163,15 @@ impl Esm {
             body["maxVersions"] = json!(max_versions);
         }
         self.client.call("set-bucket-versioning", &body).await
+    }
+
+    /// Limits how many non-current versions each key keeps (`0` keeps every one), leaving
+    /// versioning itself on or off as it is. Once an upload adds a version beyond the limit, the
+    /// oldest are deleted, file and all, so lowering it takes effect key by key on the next
+    /// upload. The current object is never counted: a limit of 1 is "the object and the one
+    /// before it".
+    pub async fn set_bucket_max_versions(&self, ern: &str, max_versions: u64) -> Result<SetBucketVersioningResponse> {
+        self.set_bucket_versioning(ern, None, Some(max_versions)).await
     }
 
     /// Takes a bucket out of service: its events are held rather than delivered until
@@ -271,6 +306,15 @@ impl Esm {
     // Objects
     // -----------------------------------------------------------------------------------------
 
+    /// Lists objects. Beyond paging and sorting, the request can match keys other than by prefix
+    /// ([`match_type`](ListObjectsRequest::match_type)), or list one level of the bucket rather
+    /// than a whole subtree ([`delimiter`](ListObjectsRequest::delimiter) `"/"`), with the
+    /// directories one step below in [`common_prefixes`](ListObjectsResponse::common_prefixes) -
+    /// how a bucket of hundreds of thousands of objects is browsed like a file system.
+    ///
+    /// Refused with 400 for an unknown match type, a regex that does not compile, a delimiter
+    /// other than `"/"`, a level that does not end in `"/"`, or a delimiter with any match type
+    /// but [`MatchType::Prefix`]; 404 if there is no such bucket.
     pub async fn list_objects(&self, request: &ListObjectsRequest) -> Result<ListObjectsResponse> {
         self.client.call("list-objects", request).await
     }
@@ -350,7 +394,13 @@ impl Esm {
         self.client.call("verify-objects", &body).await
     }
 
-    /// Deletes the objects with these keys from a bucket.
+    /// Deletes the objects with these keys from a bucket. A key with no object is not an error;
+    /// compare [`asked`](DeleteObjectsResponse::asked) with
+    /// [`objects`](DeleteObjectsResponse::objects) to tell.
+    ///
+    /// An empty key list deletes nothing and is answered here, without a request: to the server,
+    /// a delete naming neither keys nor a prefix means the whole bucket. Deleting everything
+    /// under a prefix is [`delete_objects_by_prefix`](Self::delete_objects_by_prefix).
     pub async fn delete_objects<I, S>(
         &self,
         bucket_ern: &str,
@@ -362,7 +412,37 @@ impl Esm {
         S: Into<String>,
     {
         let keys: Vec<String> = keys.into_iter().map(Into::into).collect();
+        if keys.is_empty() {
+            return Ok(DeleteObjectsResponse {
+                ern: Some(bucket_ern.to_owned()),
+                is_async: run_async,
+                ..Default::default()
+            });
+        }
         let body = json!({ "ern": bucket_ern, "keys": keys, "async": run_async });
+        self.client.call("delete-objects", &body).await
+    }
+
+    /// Deletes everything under `prefix` (empty for the whole bucket), keeping the bucket.
+    ///
+    /// The same removal as [`purge_bucket`](Self::purge_bucket), with one thing it cannot say:
+    /// `notify` false deletes the objects without a deletion event for any of them - for an
+    /// operator who knows what is listening, e.g. clearing out a staging area a downstream
+    /// consumer would otherwise act on object by object. In the background (`run_async`) the
+    /// server answers with how many objects it took on and the
+    /// [`job_id`](DeleteObjectsResponse::job_id) doing it.
+    pub async fn delete_objects_by_prefix(
+        &self,
+        bucket_ern: &str,
+        prefix: &str,
+        run_async: bool,
+        notify: bool,
+    ) -> Result<DeleteObjectsResponse> {
+        let mut body = json!({ "ern": bucket_ern, "prefix": prefix, "async": run_async });
+        // Absent means announce; only a silence that was asked for is sent.
+        if !notify {
+            body["notify"] = json!(false);
+        }
         self.client.call("delete-objects", &body).await
     }
 

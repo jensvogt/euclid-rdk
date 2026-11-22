@@ -6,7 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use euclid_rdk::esm::{Attributes, LifecycleRule, ListBucketsRequest, TransferOptions, Variant};
+use euclid_rdk::esm::{
+    Attributes, CreateBucketRequest, LifecycleRule, ListBucketsRequest, ListObjectsRequest, MatchType, TransferOptions,
+    Variant,
+};
 use euclid_rdk::{Eam, Error, Esm};
 use serde_json::{json, Value};
 use wiremock::matchers::{body_bytes, body_json, header, header_exists, method};
@@ -113,7 +116,7 @@ async fn delete_and_purge_read_both_answer_shapes() {
     let server = MockServer::start().await;
     let esm = esm(&server).await;
     Mock::given(header("x-euclid-action", "delete-bucket"))
-        .and(body_json(json!({ "ern": BUCKET, "async": false })))
+        .and(body_json(json!({ "ern": BUCKET, "async": false, "ifEmpty": false })))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
@@ -134,6 +137,226 @@ async fn delete_and_purge_read_both_answer_shapes() {
     assert_eq!(purged.count, 42);
     assert_eq!(purged.job_id.as_deref(), Some("j1"));
     assert!(purged.is_async);
+}
+
+/// Absent unless asked for, like priority: an ordinary create says exactly what it always said.
+#[tokio::test]
+async fn create_bucket_carries_the_internal_flag_only_when_set() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "create-bucket"))
+        .and(body_json(json!({ "name": "artifacts", "internal": true })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "name": "artifacts", "ern": BUCKET })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let created = esm
+        .create_bucket_with(&CreateBucketRequest {
+            name: "artifacts".into(),
+            internal: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.ern.as_deref(), Some(BUCKET));
+}
+
+#[tokio::test]
+async fn delete_bucket_if_empty_sends_the_flag_and_surfaces_the_conflict() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "delete-bucket"))
+        .and(body_json(json!({ "ern": BUCKET, "async": false, "ifEmpty": true })))
+        .respond_with(ResponseTemplate::new(409).set_body_string("Bucket is not empty: 3 object(s) remain."))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = esm.delete_bucket_if_empty(BUCKET).await.unwrap_err();
+    assert!(matches!(err, Error::Service { status: 409, .. }), "{err}");
+}
+
+#[tokio::test]
+async fn list_buckets_sends_match_type_and_include_internal_only_when_asked() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "list-buckets"))
+        .and(body_json(json!({
+            "prefix": ".xml", "matchType": "endsWith", "pageSize": 10, "pageIndex": 0,
+            "sortColumn": "name", "sortDirection": "asc", "includeInternal": true
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "total": 0, "buckets": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // The default request leaving both out is covered by json_calls_are_signed_and_buckets_parse.
+    esm.list_buckets(&ListBucketsRequest {
+        prefix: ".xml".into(),
+        match_type: Some(MatchType::EndsWith),
+        include_internal: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn list_objects_by_level_sends_the_delimiter_and_parses_the_directories_below() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "list-objects"))
+        .and(body_json(json!({
+            "bucketErn": BUCKET, "prefix": "in/", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
+            "sortDirection": "asc", "includeDirectories": false, "delimiter": "/"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total": 1,
+            "objects": [{ "ern": "obj-ern", "key": "in/a.xml", "lastAccessed": "2026-11-20T08:00:00Z" }],
+            "commonPrefixes": ["in/2026/", "in/2027/"]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "list-objects"))
+        .and(body_json(json!({
+            "bucketErn": BUCKET, "prefix": "report", "matchType": "contains", "pageSize": 10, "pageIndex": 0,
+            "sortColumn": "name", "sortDirection": "asc", "includeDirectories": false
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "total": 0, "objects": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "list-objects"))
+        .and(body_json(json!({
+            "bucketErn": BUCKET, "prefix": "in/", "matchType": "regex", "pageSize": 10, "pageIndex": 0,
+            "sortColumn": "name", "sortDirection": "asc", "includeDirectories": false, "delimiter": "/"
+        })))
+        .respond_with(ResponseTemplate::new(400).set_body_string("matchType must be prefix when a delimiter is given"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let level = esm
+        .list_objects(&ListObjectsRequest {
+            bucket_ern: BUCKET.into(),
+            prefix: "in/".into(),
+            delimiter: Some("/".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(level.common_prefixes, ["in/2026/", "in/2027/"]);
+    assert_eq!(level.objects[0].last_accessed.as_deref(), Some("2026-11-20T08:00:00Z"));
+
+    // A whole-subtree listing has no directories to report: an empty list, not a missing one.
+    let matched = esm
+        .list_objects(&ListObjectsRequest {
+            bucket_ern: BUCKET.into(),
+            prefix: "report".into(),
+            match_type: Some(MatchType::Contains),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(matched.common_prefixes.is_empty());
+
+    let err = esm
+        .list_objects(&ListObjectsRequest {
+            bucket_ern: BUCKET.into(),
+            prefix: "in/".into(),
+            match_type: Some(MatchType::Regex),
+            delimiter: Some("/".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Service { status: 400, .. }), "{err}");
+}
+
+#[tokio::test]
+async fn delete_objects_by_prefix_sends_only_a_silence_that_was_asked_for() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "delete-objects"))
+        .and(body_json(
+            json!({ "ern": BUCKET, "prefix": "staging/", "async": false }),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "ern": BUCKET, "prefix": "staging/", "objects": 7 })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "delete-objects"))
+        .and(body_json(
+            json!({ "ern": BUCKET, "prefix": "staging/", "async": false, "notify": false }),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "ern": BUCKET, "prefix": "staging/", "objects": 2 })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "delete-objects"))
+        .and(body_json(json!({ "ern": BUCKET, "prefix": "", "async": true })))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+            "ern": BUCKET, "prefix": "", "async": true, "jobId": "job-1", "objects": 900
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let announced = esm
+        .delete_objects_by_prefix(BUCKET, "staging/", false, true)
+        .await
+        .unwrap();
+    assert_eq!(announced.prefix.as_deref(), Some("staging/"));
+    assert_eq!(announced.objects, 7);
+    assert_eq!(announced.asked, 0);
+    assert_eq!(announced.job_id, None);
+
+    let silent = esm
+        .delete_objects_by_prefix(BUCKET, "staging/", false, false)
+        .await
+        .unwrap();
+    assert_eq!(silent.objects, 2);
+
+    let background = esm.delete_objects_by_prefix(BUCKET, "", true, true).await.unwrap();
+    assert!(background.is_async);
+    assert_eq!(background.job_id.as_deref(), Some("job-1"));
+    assert_eq!(background.objects, 900);
+}
+
+/// An empty key list would reach the server as "no keys", which with no prefix is the whole
+/// bucket - so it is answered without a request.
+#[tokio::test]
+async fn delete_objects_with_no_keys_sends_nothing() {
+    let server = MockServer::start().await;
+    let esm = esm(&server).await;
+    Mock::given(header("x-euclid-action", "delete-objects"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ern": BUCKET, "prefix": "", "objects": 100 })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(header("x-euclid-action", "delete-objects"))
+        .and(body_json(json!({ "ern": BUCKET, "keys": ["a", "b"], "async": false })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ern": BUCKET, "asked": 2, "objects": 1 })))
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let none = esm.delete_objects(BUCKET, Vec::<String>::new(), false).await.unwrap();
+    assert_eq!(none.objects, 0);
+    assert_eq!(none.asked, 0);
+    assert_eq!(none.ern.as_deref(), Some(BUCKET));
+
+    let some = esm.delete_objects(BUCKET, ["a", "b"], false).await.unwrap();
+    assert_eq!(some.asked, 2);
+    assert_eq!(some.objects, 1);
+    assert_eq!(some.prefix, None);
 }
 
 #[tokio::test]
@@ -515,7 +738,8 @@ async fn bucket_versioning_sends_only_what_is_set() {
     let on = esm.set_bucket_versioning(BUCKET, Some(true), None).await.unwrap();
     assert!(on.versioning);
     assert_eq!(on.max_versions, 0);
-    let limited = esm.set_bucket_versioning(BUCKET, None, Some(5)).await.unwrap();
+    // Only the limit: sending "enabled" would switch versioning as a side effect of capping it.
+    let limited = esm.set_bucket_max_versions(BUCKET, 5).await.unwrap();
     assert_eq!(limited.max_versions, 5);
     let bucket = esm.get_bucket(BUCKET).await.unwrap();
     assert!(bucket.versioning);
