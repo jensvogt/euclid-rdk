@@ -38,8 +38,9 @@ use crate::Result;
 /// EMO operations, obtained from [`Session::emo`](crate::Session::emo).
 ///
 /// Pushing is meant for ordinary principals: an application reporting its own load holds no more
-/// privilege than any other application. Reading and alerting need an administrator. Requests are SigV4-signed with the session's access key when it has
-/// one, otherwise authenticated with the bearer token. Cloning is cheap.
+/// privilege than any other application. Reading and alerting need an administrator; the
+/// caller's own dashboards need only authentication. Requests are SigV4-signed with the session's
+/// access key when it has one, otherwise authenticated with the bearer token. Cloning is cheap.
 #[derive(Debug, Clone)]
 pub struct Emo {
     client: ServiceClient,
@@ -67,8 +68,14 @@ impl Emo {
     // Reading metrics (administrator only)
     // -----------------------------------------------------------------------------------------
 
-    /// Lists stored rows - one bucket of one series each - matching `query`, at most 100 unless
-    /// [`MetricQuery::limit`] says otherwise.
+    /// Reads EMO's stored rows matching `query` - the series themselves, as a graph draws them -
+    /// newest first.
+    ///
+    /// This is the read side of everything EMO writes: its own collectors, every module's pushed
+    /// samples and [`push_metrics`](Self::push_metrics). Each row is one bucket of one series at
+    /// the requested resolution (see [`MetricRow`]). The server caps the answer at 100 rows unless
+    /// [`MetricQuery::limit`] says otherwise; since a busy installation writes many series per
+    /// period, narrowing by name and time is what makes that cap irrelevant, rather than raising it.
     ///
     /// Administrator only: anyone else gets HTTP 403.
     pub async fn list(&self, query: &MetricQuery) -> Result<Vec<MetricRow>> {
@@ -76,8 +83,14 @@ impl Emo {
         Ok(answer.items)
     }
 
-    /// The sample-weighted average of the rows matching `query`, across every series regardless
-    /// of labels. 0 when nothing matches.
+    /// Averages every stored row matching `query` into one figure - "what was it over the last
+    /// day", answered by the database rather than by fetching the rows.
+    ///
+    /// The mean is sample-weighted, as EMO's roll-ups are, so a quiet bucket does not count as much
+    /// as a busy one. Every matching series counts unless the query's labels narrow them, and
+    /// [`MetricQuery::limit`] is ignored. No matching rows is 0, not an error - and so is an
+    /// installation without MongoDB, which cannot aggregate - so a zero is worth checking against
+    /// [`list`](Self::list) before it is believed.
     ///
     /// Administrator only: anyone else gets HTTP 403.
     pub async fn average(&self, query: &MetricQuery) -> Result<f64> {
@@ -164,14 +177,17 @@ impl Emo {
     /// Saves `dashboard` - a layout that must serialize to a JSON object - as the caller's
     /// dashboard `name`, replacing one of that name but keeping its creation time.
     ///
-    /// Dashboards belong to the authenticated user and need no administrator privileges; there is
-    /// no way to name another user's.
+    /// EMO stores the layout as given, nulls included, and does not look inside, so its shape is
+    /// the caller's own. Dashboards belong to the authenticated user and need no administrator
+    /// privileges; there is no way to name another user's, so no way to overwrite theirs. An
+    /// empty `name`, or a layout that is not a JSON object, is HTTP 400.
     pub async fn save_dashboard(&self, name: &str, dashboard: &impl Serialize) -> Result<SavedDashboard> {
         let body = json!({ "name": name, "dashboard": serde_json::to_value(dashboard)? });
         self.client.call("save-dashboard", &body).await
     }
 
-    /// The caller's dashboard `name`, layout included. An unknown name is HTTP 404.
+    /// The caller's dashboard `name`, layout included, exactly as it was saved. An unknown name is
+    /// HTTP 404; a stored layout that is no longer readable JSON is HTTP 500.
     pub async fn get_dashboard(&self, name: &str) -> Result<Dashboard> {
         self.client.call("get-dashboard", &json!({ "name": name })).await
     }
@@ -181,7 +197,8 @@ impl Emo {
         self.client.call("list-dashboards", &json!({})).await
     }
 
-    /// Deletes the caller's dashboard `name`. An unknown name is HTTP 404.
+    /// Deletes the caller's dashboard `name` - only the layout; the metrics it showed are not
+    /// touched. An unknown name is HTTP 404.
     pub async fn delete_dashboard(&self, name: &str) -> Result<()> {
         self.client
             .call_unit("delete-dashboard", &json!({ "name": name }))

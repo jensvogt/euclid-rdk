@@ -393,3 +393,220 @@ async fn missing_dashboard_is_not_found() {
 
     assert_eq!(emo.get_dashboard("x").await.unwrap_err().status(), Some(404));
 }
+
+#[tokio::test]
+async fn list_sends_every_filter_and_reads_multi_dimensional_rows() {
+    let server = MockServer::start().await;
+    let emo = emo(&server).await;
+    let seen = mount(
+        &server,
+        "list",
+        200,
+        json!({ "items": [{
+            "name": "jvm-memory-used", "labels": { "area": "heap", "id": "G1 Eden Space" },
+            "labelName": "area", "labelValue": "heap", "value": 12.5, "minValue": 10.0, "maxValue": 20.0,
+            "samples": 4, "type": "GAUGE", "resolution": "HOUR", "timestamp": "2026-11-06T10:00:00Z"
+        }]}),
+    )
+    .await;
+
+    let rows = emo
+        .list(&MetricQuery {
+            labels: labels(&[("area", "heap")]),
+            label_name: Some("id".into()),
+            label_value: Some("G1 Eden Space".into()),
+            resolution: Some(Resolution::Hour),
+            from: Some("2026-11-06T00:00:00Z".into()),
+            to: Some("2026-11-07T00:00:00Z".into()),
+            limit: Some(500),
+            ..MetricQuery::named("jvm-memory-used")
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap()[0],
+        json!({
+            "name": "jvm-memory-used", "labels": { "area": "heap" }, "labelName": "id",
+            "labelValue": "G1 Eden Space", "resolution": "HOUR", "from": "2026-11-06T00:00:00Z",
+            "to": "2026-11-07T00:00:00Z", "limit": 500
+        })
+    );
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.name, "jvm-memory-used");
+    assert_eq!(row.labels, labels(&[("area", "heap"), ("id", "G1 Eden Space")]));
+    assert_eq!((row.label_name.as_str(), row.label_value.as_str()), ("area", "heap"));
+    assert_eq!(
+        (row.value, row.min_value, row.max_value, row.samples),
+        (12.5, 10.0, 20.0, 4)
+    );
+}
+
+#[tokio::test]
+async fn empty_query_leaves_every_filter_to_the_server() {
+    let server = MockServer::start().await;
+    let emo = emo(&server).await;
+    let seen = mount(&server, "list", 200, json!({ "items": [] })).await;
+
+    let rows = emo.list(&MetricQuery::default()).await.unwrap();
+
+    assert_eq!(seen.lock().unwrap()[0], json!({}));
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn row_figures_are_read_leniently() {
+    let server = MockServer::start().await;
+    let emo = emo(&server).await;
+    mount(
+        &server,
+        "list",
+        200,
+        json!({ "items": [{ "name": "x", "value": null, "minValue": "1.5", "samples": "3", "type": "SOMETHING" }] }),
+    )
+    .await;
+
+    let rows = emo.list(&MetricQuery::named("x")).await.unwrap();
+
+    assert_eq!(
+        (rows[0].value, rows[0].min_value, rows[0].max_value, rows[0].samples),
+        (0.0, 1.5, 0.0, 3)
+    );
+    assert_eq!(rows[0].kind, None);
+    assert!(rows[0].labels.is_empty());
+}
+
+#[tokio::test]
+async fn average_sends_the_query_without_an_unset_limit() {
+    let server = MockServer::start().await;
+    let emo = emo(&server).await;
+    let seen = mount(&server, "average", 200, json!({ "average": 0.42 })).await;
+
+    let average = emo
+        .average(&MetricQuery {
+            from: Some("2026-11-06T00:00:00Z".into()),
+            ..MetricQuery::named("system-load-per-core")
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(average, 0.42);
+    assert_eq!(
+        seen.lock().unwrap()[0],
+        json!({ "name": "system-load-per-core", "from": "2026-11-06T00:00:00Z" })
+    );
+}
+
+#[tokio::test]
+async fn non_administrator_is_forbidden_from_series_queries() {
+    let server = MockServer::start().await;
+    let emo = emo(&server).await;
+    mount(
+        &server,
+        "average",
+        403,
+        json!({ "error": "Administrator privileges required" }),
+    )
+    .await;
+
+    let err = emo.average(&MetricQuery::named("x")).await.unwrap_err();
+
+    match &err {
+        Error::Service {
+            service,
+            action,
+            status,
+            ..
+        } => {
+            assert_eq!((service.as_str(), action.as_str(), *status), ("emo", "average", 403));
+        }
+        other => panic!("expected a service error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn save_dashboard_keeps_the_layouts_nulls() {
+    let server = MockServer::start().await;
+    let emo = emo(&server).await;
+    let seen = mount(
+        &server,
+        "save-dashboard",
+        200,
+        json!({ "name": "ops", "userId": "alice", "modified": "2026-11-06T10:00:00Z" }),
+    )
+    .await;
+    let layout = json!({ "panels": [{ "metric": "system-load-per-core" }], "title": null });
+
+    let saved = emo.save_dashboard("ops", &layout).await.unwrap();
+
+    assert_eq!(seen.lock().unwrap()[0], json!({ "name": "ops", "dashboard": layout }));
+    assert_eq!(saved.name, "ops");
+    assert_eq!(saved.user_id, "alice");
+    assert_eq!(saved.modified.as_deref(), Some("2026-11-06T10:00:00Z"));
+}
+
+#[tokio::test]
+async fn get_dashboard_reads_the_layout_with_its_nulls() {
+    let server = MockServer::start().await;
+    let emo = emo(&server).await;
+    mount(
+        &server,
+        "get-dashboard",
+        200,
+        json!({
+            "name": "ops", "dashboard": { "columns": 2, "panels": [{ "metric": "system-load-per-core" }], "title": null },
+            "created": "2026-11-01T09:00:00Z", "modified": "2026-11-06T10:00:00Z"
+        }),
+    )
+    .await;
+
+    let dashboard = emo.get_dashboard("ops").await.unwrap();
+
+    assert_eq!(dashboard.dashboard["columns"], 2);
+    assert_eq!(
+        dashboard.dashboard["panels"],
+        json!([{ "metric": "system-load-per-core" }])
+    );
+    assert_eq!(dashboard.dashboard.get("title"), Some(&Value::Null));
+    assert_eq!(dashboard.modified.as_deref(), Some("2026-11-06T10:00:00Z"));
+}
+
+#[tokio::test]
+async fn a_layout_that_is_not_an_object_reads_as_empty() {
+    let server = MockServer::start().await;
+    let emo = emo(&server).await;
+    mount(
+        &server,
+        "get-dashboard",
+        200,
+        json!({ "name": "ops", "dashboard": null }),
+    )
+    .await;
+
+    let dashboard = emo.get_dashboard("ops").await.unwrap();
+
+    assert_eq!(dashboard.dashboard, json!({}));
+    assert_eq!(euclid_rdk::emo::Dashboard::default().dashboard, json!({}));
+}
+
+#[tokio::test]
+async fn delete_dashboard_surfaces_not_found() {
+    let server = MockServer::start().await;
+    let emo = emo(&server).await;
+    let seen = mount(
+        &server,
+        "delete-dashboard",
+        404,
+        json!({ "error": "No dashboard called 'ops'" }),
+    )
+    .await;
+
+    let err = emo.delete_dashboard("ops").await.unwrap_err();
+
+    assert_eq!(seen.lock().unwrap()[0], json!({ "name": "ops" }));
+    match &err {
+        Error::Service { action, status, .. } => assert_eq!((action.as_str(), *status), ("delete-dashboard", 404)),
+        other => panic!("expected a service error, got {other:?}"),
+    }
+}

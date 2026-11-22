@@ -105,6 +105,29 @@ fn non_empty_string<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D
     Ok(lenient_string(d)?.filter(|s| !s.is_empty()))
 }
 
+/// Reads a floating-point figure that may arrive as a number, a numeric string or `null` (how a
+/// JSON writer spells a NaN); anything unreadable is 0, as Jackson's `asDouble(0)` reads it.
+fn lenient_f64<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(match Option::<serde_json::Value>::deserialize(d)? {
+        Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        Some(serde_json::Value::String(s)) => s.trim().parse().unwrap_or(0.0),
+        _ => 0.0,
+    })
+}
+
+/// Reads a dashboard layout, taking anything but a JSON object - which EMO never stores - as an
+/// empty one, so [`Dashboard::dashboard`] is always an object however the answer was written.
+fn layout_object<'de, D: Deserializer<'de>>(d: D) -> Result<serde_json::Value, D::Error> {
+    Ok(match Option::<serde_json::Value>::deserialize(d)? {
+        Some(value @ serde_json::Value::Object(_)) => value,
+        _ => empty_layout(),
+    })
+}
+
+fn empty_layout() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
 /// Reads a metric type the way a listing spells it (`"GAUGE"`, `"RATE"`), or the way it is pushed
 /// (`"gauge"`, `"rate"`). Anything else - `"UNKNOWN"` included - reads as `None`.
 fn lenient_metric_type<'de, D: Deserializer<'de>>(d: D) -> Result<Option<MetricType>, D::Error> {
@@ -206,33 +229,59 @@ pub enum AlertSeverity {
 // Reading metrics
 // ---------------------------------------------------------------------------------------------
 
-/// Filters of `list` and `average`. Every field is optional; an unset one is left out of the
-/// request, so the server applies no filter (or its default) for it.
+/// Filters of [`Emo::list`](crate::Emo::list) and [`Emo::average`](crate::Emo::average), which
+/// the server parses alike.
+///
+/// Every field is optional and left out of the request when unset, so the server applies its own
+/// defaults: every metric, the `RAW` tier, no time bounds, and for `list` the 100 newest rows. An
+/// empty query is therefore valid, but on a busy installation it mostly shows the last few seconds
+/// of everything; name a metric.
+///
+/// The dimensions can be narrowed two ways. [`labels`](Self::labels) is the map form: every entry
+/// must match, and a row may carry more dimensions than were asked for, so `{"area": "heap"}`
+/// finds the heap series whatever else labels them. [`label_name`](Self::label_name) and
+/// [`label_value`](Self::label_value) are the older one-pair form: given together they are one
+/// more entry of the map, `label_name` alone finds the rows carrying that dimension at all, and
+/// `label_value` alone the rows where any dimension has that value.
+///
+/// ```
+/// use euclid_rdk::emo::{MetricQuery, Resolution};
+///
+/// // A day of hourly load figures.
+/// let query = MetricQuery {
+///     resolution: Some(Resolution::Hour),
+///     from: Some("2026-11-06T00:00:00Z".into()),
+///     to: Some("2026-11-07T00:00:00Z".into()),
+///     ..MetricQuery::named("system-load-per-core")
+/// };
+/// # let _ = query;
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricQuery {
-    /// Only this metric, e.g. `disk-used-percent`.
+    /// Only this metric, e.g. `disk-used-percent`; unset reads every metric.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Only series carrying every one of these dimensions with these values.
+    /// Only rows carrying every one of these dimensions with these values; left out when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-    /// Only series with this dimension - the older single-dimension filter.
+    /// Only rows carrying this dimension - with `label_value`, carrying it with that value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_name: Option<String>,
-    /// Only series whose `label_name` dimension has this value.
+    /// Only rows where some dimension - `label_name`, if given - has this value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_value: Option<String>,
     /// The tier to read; `RAW` when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
-    /// Only rows from this time on, ISO 8601.
+    /// Only rows at or after this time, ISO 8601, e.g. `2026-11-06T08:00:00Z`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// Only rows up to this time, ISO 8601.
+    /// Only rows before this time (exclusive), ISO 8601.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
-    /// At most this many rows; `list` defaults to 100, `average` to no limit.
+    /// How many rows `list` returns at most, newest first: 100 when unset, and `0` means no limit.
+    /// `average` ignores it and always reads every matching row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
 }
@@ -247,7 +296,12 @@ impl MetricQuery {
     }
 }
 
-/// One stored bucket of one series, as `list` returns it.
+/// One stored row of one series, as `list` returns it - what a graph draws a point from.
+///
+/// A row is not a sample but a bucket: every sample of the series that arrived during one period
+/// of the row's [`resolution`](Self::resolution) folded into a mean, a minimum, a maximum and a
+/// count. That is why a short spike is visible only in [`max_value`](Self::max_value), and why
+/// the count is there at all - an average across rows has to weight each by its samples.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MetricRow {
@@ -260,10 +314,13 @@ pub struct MetricRow {
     /// The first dimension's value.
     pub label_value: String,
     /// The bucket's mean for a gauge, its sum for a rate.
+    #[serde(deserialize_with = "lenient_f64")]
     pub value: f64,
     /// The smallest sample in the bucket.
+    #[serde(deserialize_with = "lenient_f64")]
     pub min_value: f64,
     /// The largest sample in the bucket.
+    #[serde(deserialize_with = "lenient_f64")]
     pub max_value: f64,
     /// How many samples went into the bucket.
     #[serde(deserialize_with = "lenient_u64")]
@@ -603,7 +660,11 @@ pub struct AlertTransition {
 // Dashboards
 // ---------------------------------------------------------------------------------------------
 
-/// What `save-dashboard` answers.
+/// What `save-dashboard` answers: which dashboard was stored, for whom, and when.
+///
+/// The owner is never part of the request - EMO files a dashboard under the user it
+/// authenticated - so [`user_id`](Self::user_id) is where a caller signing with an access key
+/// sees whose dashboard it just wrote.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SavedDashboard {
@@ -617,14 +678,22 @@ pub struct SavedDashboard {
 }
 
 /// One of the caller's saved dashboards, layout included, as `get-dashboard` returns it.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+///
+/// EMO does not interpret the layout: it stores whatever JSON object it was given and hands it
+/// back as JSON, so the layout's shape belongs to whoever drew it - the RUI, or an application
+/// keeping its own views. Read it as a [`serde_json::Value`], or into a type of your own with
+/// `serde_json::from_value`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Dashboard {
-    /// The dashboard's name.
+    /// The dashboard's name, unique among the caller's own dashboards.
     pub name: String,
-    /// The layout, exactly as it was saved - always a JSON object.
+    /// The layout exactly as it was saved, nulls included. Always a JSON object: anything else in
+    /// the answer reads as an empty one.
+    #[serde(deserialize_with = "layout_object")]
     pub dashboard: serde_json::Value,
-    /// When it was first saved, ISO 8601.
+    /// When it was first saved, ISO 8601 - kept across re-saves, so a layout edited every day
+    /// still says how old it is.
     #[serde(deserialize_with = "lenient_string")]
     pub created: Option<String>,
     /// When it was last saved, ISO 8601.
@@ -632,7 +701,20 @@ pub struct Dashboard {
     pub modified: Option<String>,
 }
 
-/// A saved dashboard in a listing: its name and times, without the layout.
+impl Default for Dashboard {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            dashboard: empty_layout(),
+            created: None,
+            modified: None,
+        }
+    }
+}
+
+/// A saved dashboard in a listing: its name and times, without the layout - a chooser needs the
+/// names, not every panel of every dashboard. Fetch the one chosen with
+/// [`Emo::get_dashboard`](crate::Emo::get_dashboard).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DashboardSummary {
@@ -646,7 +728,8 @@ pub struct DashboardSummary {
     pub modified: Option<String>,
 }
 
-/// What `list-dashboards` answers.
+/// What `list-dashboards` answers: the caller's own dashboards. There is no way to list another
+/// user's - EMO takes the owner from the authenticated identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ListDashboardsResponse {
@@ -668,5 +751,6 @@ pub(crate) struct Items<T> {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct AverageResponse {
+    #[serde(deserialize_with = "lenient_f64")]
     pub average: f64,
 }

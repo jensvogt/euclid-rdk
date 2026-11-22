@@ -348,6 +348,27 @@ published as `.count`/`.total` (rates) and `.max` (gauge), which survive EMO's r
 described as seconds are published in milliseconds. A failed scheduled push is logged (`log`) and
 dropped rather than retried.
 
+Reading the rows back and alerting on them read the whole installation and need an administrator;
+the caller's own saved dashboards need only authentication:
+
+```rust
+let rows = emo.list(&MetricQuery {                 // newest first, 100 unless `limit` says otherwise
+    resolution: Some(Resolution::Hour),
+    from: Some("2026-11-06T00:00:00Z".into()),
+    ..MetricQuery::named("system-load-per-core")
+}).await?;
+let mean = emo.average(&MetricQuery::named("system-load-per-core")).await?;  // sample-weighted
+
+emo.save_dashboard("ops", &serde_json::json!({ "panels": [] })).await?;     // any JSON object
+let layout = emo.get_dashboard("ops").await?.dashboard;
+let names = emo.list_dashboards().await?.items;                              // names and times only
+emo.delete_dashboard("ops").await?;
+```
+
+Unset query filters are left out so the server applies its defaults (every metric, `RAW`, no time
+bounds). `average` honours the labels but ignores `limit`, and answers 0 both for no matching rows
+and for an installation without MongoDB.
+
 ### EES events
 
 ```rust
