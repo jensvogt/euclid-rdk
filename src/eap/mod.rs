@@ -52,8 +52,19 @@ impl Eap {
 
     /// Defines (deploys) an application. It is created stopped; see
     /// [`CreateApplicationRequest`] for how names are resolved.
+    ///
+    /// The infrastructure declaration stored beside the artifact, if there is one, is applied as
+    /// part of the deployment, and what that did comes back as [`Application::infrastructure`]. A
+    /// declaration that could not be applied does not fail the call, so look at its
+    /// [`error`](ApplyInfrastructureResponse::error) before relying on what it declares.
     pub async fn create_application(&self, request: &CreateApplicationRequest) -> Result<Application> {
-        self.client.call("create-application", request).await
+        let mut application: Application = self.client.call("create-application", request).await?;
+        // The report is nested in the application and sent without its id; fill it in, so every
+        // ApplyInfrastructureResponse handed out names its application or its platform.
+        if let Some(report) = application.infrastructure.as_mut() {
+            report.application_id = application.application_id.clone();
+        }
+        Ok(application)
     }
 
     /// Changes an application's definition; only the fields that are `Some` change.
@@ -83,7 +94,12 @@ impl Eap {
     }
 
     /// Deploys a new build already uploaded to the application's bucket; running instances are
-    /// restarted onto it.
+    /// restarted onto it, a stopped application comes up on it when next started.
+    ///
+    /// Refused with 409 when the artifact is byte for byte the build already deployed (unless
+    /// [`force`](RedeployApplicationRequest::force) is set) or is still being uploaded, and with
+    /// 404 when it is not in the bucket. [`update_application`](Self::update_application) applies
+    /// no such check.
     pub async fn redeploy_application(&self, request: &RedeployApplicationRequest) -> Result<Application> {
         self.client.call("redeploy-application", request).await
     }
@@ -95,8 +111,20 @@ impl Eap {
 
     /// The applications whose id starts with `prefix`.
     pub async fn list_applications_with_prefix(&self, prefix: &str) -> Result<Vec<Application>> {
+        self.list_applications_with(&ListApplicationsRequest {
+            prefix: prefix.into(),
+            match_type: None,
+        })
+        .await
+    }
+
+    /// The applications whose id matches the request's search text the way it asks - as a
+    /// prefix, a suffix, a substring or a regular expression. Only the session's namespace is
+    /// searched. An unknown match type or a regular expression that does not compile is refused
+    /// with 400.
+    pub async fn list_applications_with(&self, request: &ListApplicationsRequest) -> Result<Vec<Application>> {
         self.client
-            .call_field::<Option<Vec<Application>>>("list-applications", &json!({ "prefix": prefix }), "applications")
+            .call_field::<Option<Vec<Application>>>("list-applications", request, "applications")
             .await
             .map(Option::unwrap_or_default)
     }
@@ -241,6 +269,41 @@ impl Eap {
         self.client.call_unit("delete-node", &json!({ "node": node })).await
     }
 
+    /// Drains a worker node: no new instances are placed on it, and the ones it has leave as they
+    /// are replaced. Not a stop - the node keeps running what it has and keeps renewing; draining
+    /// and then stopping the worker is how a machine is taken out of service. A drained node still
+    /// counts as live ([`Node::drained`] says which state it is in). 404 if no node of that name is
+    /// registered to the account.
+    pub async fn drain_node(&self, node: &str) -> Result<DrainNodeResponse> {
+        self.set_node_drained(node, true).await
+    }
+
+    /// Drains a worker node (`true`) or puts a drained one back into service (`false`). The flag
+    /// is always sent, since the server reads its absence as "drain". Undraining moves nothing onto
+    /// the node by itself; it only lets placement choose it again.
+    pub async fn set_node_drained(&self, node: &str, drained: bool) -> Result<DrainNodeResponse> {
+        let answer = self
+            .client
+            .call_value("drain-node", &json!({ "node": node, "drained": drained }))
+            .await?;
+        Ok(DrainNodeResponse {
+            node: answer.get("node").and_then(Value::as_str).map(str::to_owned),
+            // An answer without the flag reads as what was asked for, as euclid-jdk does.
+            drained: answer.get("drained").and_then(Value::as_bool).unwrap_or(drained),
+        })
+    }
+
+    /// Gives one instance slot to a worker node by hand, with a lease on the claim - or takes it
+    /// back to the manager's own host when [`node`](AssignInstanceRequest::node) is empty.
+    ///
+    /// Placement does this by itself; this is the operator's override for moving one instance
+    /// somewhere specific. The claim lasts one lease period; a node that does not renew it in time
+    /// loses the slot to placement again. 400 if the runtime name or instance id is missing, 404 if
+    /// the node is not registered or the pool has no such slot, 409 if the node is drained.
+    pub async fn assign_instance(&self, request: &AssignInstanceRequest) -> Result<AssignInstanceResponse> {
+        self.client.call("assign-instance", request).await
+    }
+
     // -----------------------------------------------------------------------------------------
     // Load and egress (called by an application about itself)
     // -----------------------------------------------------------------------------------------
@@ -286,15 +349,16 @@ impl Eap {
     }
 
     /// Reports that `site` refused a request (429/503), so no instance calls it for
-    /// `retry_after_seconds`.
+    /// `retry_after_seconds` (euclid caps one report at an hour and floors it at a second).
+    /// Answers until when the site is now left alone - never earlier than a block already in force.
     pub async fn report_egress_throttled(
         &self,
         application_id: &str,
         site: &str,
         retry_after_seconds: u64,
-    ) -> Result<()> {
+    ) -> Result<EgressThrottledResponse> {
         let body = json!({ "applicationId": application_id, "site": site, "retryAfterSeconds": retry_after_seconds });
-        self.client.call_unit("report-egress-throttled", &body).await
+        self.client.call("report-egress-throttled", &body).await
     }
 
     /// The sites applications call, with limits and current use; `application_id` narrows it to

@@ -64,16 +64,19 @@ impl<'de> Deserialize<'de> for RouteAuthentication {
 }
 
 /// What the API gateway does with a request a route matches.
+///
+/// The distinction is "who reads the body": a proxied request is buffered whole and handed on, an
+/// upload is streamed straight through to ESM in parts and never held in memory.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum RouteType {
-    /// Forwards it to an application or to one action of a euclid module. What the server
-    /// assumes when a create names no type.
-    Proxy,
-    /// Is the endpoint itself: stores the request body as an object in an ESM bucket (see
-    /// [`UploadSpec`]).
-    Upload,
-    /// Anything this client does not know, or none given.
+    /// Forwards it to an application or to one action of a euclid module. What a route is unless
+    /// it says otherwise - also what a route stored before route types existed reads as.
     #[default]
+    Proxy,
+    /// Is the endpoint itself: streams the request body into an ESM bucket (see [`UploadSpec`]).
+    Upload,
+    /// A stored value this client does not recognize. Only ever read back, never meant to be
+    /// sent - the server refuses it with 400.
     Unknown,
 }
 
@@ -87,8 +90,13 @@ impl RouteType {
         }
     }
 
-    /// Reads a wire value case-insensitively; anything unrecognized is [`Unknown`](Self::Unknown).
+    /// Reads a wire value case-insensitively. Empty is [`Proxy`](Self::Proxy), as a route stored
+    /// before the type existed is; anything present but unrecognized is
+    /// [`Unknown`](Self::Unknown) rather than being passed off as a proxy route.
     pub fn from_wire_value(value: &str) -> Self {
+        if value.is_empty() {
+            return Self::Proxy;
+        }
         [Self::Proxy, Self::Upload]
             .into_iter()
             .find(|t| t.wire_value().eq_ignore_ascii_case(value))
@@ -154,7 +162,7 @@ fn default_true() -> bool {
 }
 
 /// A path the API gateway publishes, and what it forwards to: an application, or one action of a
-/// euclid module.
+/// euclid module - or, for an [upload route](RouteType::Upload), the bucket it writes into.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Route {
@@ -171,14 +179,18 @@ pub struct Route {
     #[serde(default)]
     pub path: Option<String>,
     /// Whether the route forwards ([`RouteType::Proxy`]) or stores uploads
-    /// ([`RouteType::Upload`]); [`RouteType::Unknown`] from a server that predates route types.
+    /// ([`RouteType::Upload`]). [`RouteType::Proxy`] when the server leaves it out, as one that
+    /// predates route types does; [`RouteType::Unknown`] only for a type this client does not know.
     #[serde(default, rename = "type")]
     pub kind: RouteType,
-    /// Where an upload route stores what it receives; all empty on a proxy route.
+    /// Where an upload route stores what it receives; all empty on a proxy route, which never reads
+    /// it (and when the server leaves it out).
     #[serde(default)]
     pub upload: UploadSpec,
+    /// The application serving this path, or empty for a module or upload route.
     #[serde(default)]
     pub application_id: Option<String>,
+    /// The euclid module this route reaches instead of an application, e.g. `"eam"`.
     #[serde(default)]
     pub module_target: Option<String>,
     #[serde(default)]
@@ -212,6 +224,12 @@ impl Route {
     pub fn is_module_route(&self) -> bool {
         self.module_target.as_deref().is_some_and(|t| !t.is_empty())
     }
+
+    /// Whether the route terminates requests at the gateway and writes their bodies into a
+    /// bucket, rather than forwarding them anywhere.
+    pub fn is_upload_route(&self) -> bool {
+        self.kind == RouteType::Upload
+    }
 }
 
 /// Where an upload route puts what it receives, and what it accepts.
@@ -235,6 +253,13 @@ pub struct UploadSpec {
 
 /// Body of `create-route` and `update-route`. Fields left `None` are not sent: on create the
 /// server applies its defaults, on update they stay as they are. `route_id` names the route.
+///
+/// A proxy route names either an application or a module (with its action), never both. An
+/// upload route names a `bucket` instead of either - naming a backend as well is refused - and
+/// must require a credential: [`RouteAuthentication::None`] would make it a public write endpoint
+/// and is refused with 400. An update is judged on the route as a whole after it is applied, so
+/// turning a proxy route into an upload route has to name a bucket and clear its application or
+/// module in the same request.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteRequest {
@@ -268,22 +293,42 @@ pub struct RouteRequest {
     /// is refused with 400.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
-    /// Upload routes only: ERN of the ESM bucket to store into (404 if there is none). Required
-    /// for, and only accepted on, a [`RouteType::Upload`] route.
+    /// Upload routes only: ERN - not name - of the ESM bucket to store into (404 if there is
+    /// none). Required for, and only accepted on, a [`RouteType::Upload`] route.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bucket: Option<String>,
-    /// Upload routes only: prefix every key is confined to; empty for the whole bucket.
+    /// Upload routes only: prefix every key is confined to, e.g. `"incoming/"`; empty for the
+    /// whole bucket, which lets anybody who may upload at all overwrite anything in it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_prefix: Option<String>,
     /// Upload routes only: largest body accepted, in bytes; 0 is no limit beyond the listener's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
-    /// Upload routes only: bytes per multipart part; the server defaults to 5 MiB.
+    /// Upload routes only: bytes per multipart part, and the size under which a body is stored in
+    /// one piece; the server defaults to 5 MiB (and falls back to it for one not positive).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub part_size: Option<u64>,
     /// Upload routes only: content types accepted; empty for any. Replaces the list on update.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_types: Option<Vec<String>>,
+}
+
+/// Body of `list-routes`: the routes of the session's account and namespace whose *path* (not id)
+/// matches `prefix` the way `match_type` says.
+///
+/// Every match type but `"regex"` treats the text literally, so `/api/v1.0` does not also match
+/// `/api/v1X0`. An unknown match type, or a regular expression that does not compile, is refused
+/// with 400.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListRoutesRequest {
+    /// The text paths are matched against; empty returns every route. Only a prefix under the
+    /// default match type.
+    pub prefix: String,
+    /// `"prefix"`, `"endsWith"`, `"contains"` or `"regex"`; `None` is not sent and means
+    /// `"prefix"`, as every listing did before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<String>,
 }
 
 /// Body of `create-route`.

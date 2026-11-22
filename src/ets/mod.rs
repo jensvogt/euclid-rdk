@@ -55,14 +55,27 @@ impl Ets {
         self.client.call("update-server", request).await
     }
 
-    /// Lists every transfer server.
+    /// Lists every transfer server in this session's account and namespace - not every server on
+    /// the host: every other action resolves a server ID in the namespace it is made in, so a
+    /// listing that crossed namespaces would show servers this session cannot address.
     pub async fn list_servers(&self) -> Result<Vec<TransferServer>> {
         self.list_servers_with_prefix("").await
     }
 
     /// Lists the transfer servers whose ID starts with `prefix` (empty for all).
     pub async fn list_servers_with_prefix(&self, prefix: &str) -> Result<Vec<TransferServer>> {
-        let response: ListServersResponse = self.client.call("list-servers", &json!({ "prefix": prefix })).await?;
+        self.list_servers_with(&ListServersRequest {
+            prefix: prefix.into(),
+            match_type: None,
+        })
+        .await
+    }
+
+    /// Lists the transfer servers whose ID matches the request's search text the way it asks - as
+    /// a prefix, a suffix, a substring or a regular expression. An unknown match type or a regular
+    /// expression that does not compile is refused with 400.
+    pub async fn list_servers_with(&self, request: &ListServersRequest) -> Result<Vec<TransferServer>> {
+        let response: ListServersResponse = self.client.call("list-servers", request).await?;
         Ok(response.servers)
     }
 

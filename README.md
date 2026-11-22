@@ -315,8 +315,11 @@ ets.start_server("inbound").await?;           // records intent; `state` follows
 A transfer server is an FTP or SFTP listener in front of an ESM bucket: clients log in with their
 EAM credentials and every upload becomes an object. It is created stopped; `start_server` and
 `stop_server` set `desired_state`, and the server's reconciler brings `state` in line.
-`update_server` sends only the fields that are set. Also: `list_servers`, `get_server`,
-`delete_server`. An unknown bucket is a 404, a port already in use a 409.
+`update_server` sends only the fields that are set. `TransferServer::user_count` is how many
+people may log in (the union of `user_ids` and the groups' members). `list_servers` covers the
+session's namespace; `list_servers_with(&ListServersRequest { .. })` adds a `match_type`
+(`"prefix"`, `"endsWith"`, `"contains"`, `"regex"`). Also: `get_server`, `delete_server`. An
+unknown bucket is a 404, a port already in use a 409.
 
 ### EAG API gateway
 
@@ -332,11 +335,15 @@ let listeners = eag.list_listeners().await?;
 ```
 
 The API gateway publishes plain HTTP paths to the outside world and forwards them to an
-application or to one euclid module action. `update_route(&RouteRequest { .. })` changes only the
-fields given, and the same struct with `create_route_with` sets methods, namespace,
-`RouteAuthentication` and `active`. `list_routes(prefix)` covers the session's namespace;
-`list_listeners` reports what is configured and, through `serving`, whether anything is bound.
-Also: `get_route`, `delete_route`.
+application or to one euclid module action - or, for an upload route
+(`create_upload_route(id, path, bucket_ern, auth)`, `RouteType::Upload`), streams the request body
+into an ESM bucket itself. `update_route(&RouteRequest { .. })` changes only the fields given, and
+the same struct with `create_route_with` sets methods, namespace, `RouteAuthentication`, `active`,
+a per-route backend `timeout` and an upload route's key prefix, size limit, part size and content
+types. `list_routes(prefix)` covers the session's namespace; `list_routes_with(&ListRoutesRequest
+{ .. })` adds a `match_type` (`"prefix"`, `"endsWith"`, `"contains"`, `"regex"`). `list_listeners`
+reports what is configured and, through `serving`, whether anything is bound. Also: `get_route`,
+`delete_route`.
 
 ### EAP applications
 
@@ -355,13 +362,21 @@ let nodes = eap.list_nodes().await?;
 
 An application is an artifact in an ESM bucket that euclid runs as a pool of processes. Every
 name is resolved at deployment (404 for a missing bucket, artifact or resource, 409 for a taken
-id). `update_application` changes only the fields that are `Some`. Also: `copy_application`
-(promote to another namespace), `scale_application`, `redeploy_application`,
-`restart_application`/`rebalance_application`, log levels, infrastructure and platform
-declarations (`plan_*` changes nothing), and nodes. Environment values print as `<redacted>` in
-`Debug`. `EgressLimiter` makes an application's calls to outside sites wait for a permit from
-EAP, shared by all its instances - `limiter.run("api.example.com", fetch()).await?` - timing out
-with an `EgressTimeout`, and falling back to local pacing if EAP cannot be asked.
+id). Grants cover `buckets`, `queues`, `topics` and `secrets`; `memory_limit_mb`/`cpu_limit` cap
+each instance. `create_application` applies the artifact's infrastructure declaration too and
+reports it in `Application::infrastructure` - a declaration that failed does not fail the
+deployment, so check its `error`. `update_application` changes only the fields that are `Some`
+(including `namespace` to move the application and `user` to change its identity); setting any
+of the four resource lists replaces all of them. `redeploy_application` refuses a build
+byte-for-byte identical to the deployed one unless `force: Some(true)`. `list_applications_with`
+takes a `match_type` (`"prefix"`, `"endsWith"`, `"contains"`, `"regex"`). Also: `copy_application`
+(promote to another namespace), `scale_application`, `restart_application`/`rebalance_application`,
+log levels, infrastructure and platform declarations (`plan_*` changes nothing), and nodes -
+`drain_node`/`set_node_drained` and `assign_instance` to move a slot by hand. Environment values
+print as `<redacted>` in `Debug`. `EgressLimiter` makes an application's calls to outside sites
+wait for a permit from EAP, shared by all its instances - `limiter.run("api.example.com",
+fetch()).await?` - timing out with an `EgressTimeout`, and falling back to local pacing if EAP
+cannot be asked; permits report the `limits` they were decided under.
 
 ### EMO metrics
 
