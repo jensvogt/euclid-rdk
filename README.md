@@ -176,7 +176,24 @@ esm.upload_file(&bucket, "big.iso", "/tmp/big.iso", &TransferOptions::default())
 esm.download_file(&bucket, "big.iso", "/tmp/copy.iso", &TransferOptions::default()).await?;
 
 let objects = esm.list_objects(&ListObjectsRequest { bucket_ern: bucket.clone(), ..Default::default() }).await?;
+
+// One level of the bucket, like a directory listing: the objects directly in "in/" and the
+// directories one step below it in `common_prefixes`.
+let level = esm.list_objects(&ListObjectsRequest {
+    bucket_ern: bucket.clone(), prefix: "in/".into(), delimiter: Some("/".into()), ..Default::default()
+}).await?;
+
+// Tidy up only if nothing is left: a bucket with objects in it is a 409, not emptied.
+esm.delete_objects_by_prefix(&bucket, "tmp/", false, true).await?;   // notify = false deletes silently
+esm.delete_bucket_if_empty(&bucket).await?;
 ```
+
+Listings of buckets and objects match `prefix` literally from the start by default;
+`match_type: Some(MatchType::EndsWith | Contains | Regex)` matches it otherwise, and
+`ListBucketsRequest::include_internal` lists euclid's internal buckets too (administrators only).
+`create_bucket_with(&CreateBucketRequest { internal: true, .. })` creates a bucket hidden from the
+start. `delete_objects` with no keys sends nothing - to the server that would mean the whole bucket.
+`set_bucket_versioning`/`set_bucket_max_versions` cap the non-current versions kept per key.
 
 Also available: bucket tags, priority, stop/start, encryption, rename/purge,
 `copy_object`/`move_object`/`rename_object`, object attributes (`Variant`), subscriptions

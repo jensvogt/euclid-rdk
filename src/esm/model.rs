@@ -19,6 +19,42 @@ pub use crate::variant::Variant;
 /// Object attributes by name, as `x-euclid-attributes` / `x-euclid-system-attributes` carry them.
 pub type Attributes = BTreeMap<String, Variant>;
 
+/// How a listing's `prefix` is matched against names or keys.
+///
+/// Every type but [`Regex`](MatchType::Regex) takes the text literally, so `"a.b"` does not also
+/// find `"aXb"`. A regex is compiled by the server first; one that does not compile is refused
+/// with HTTP 400 rather than read as "no filter". Leaving the match type unset is the same as
+/// [`Prefix`](MatchType::Prefix).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MatchType {
+    /// Starts with the text.
+    #[default]
+    Prefix,
+    /// Ends with the text.
+    EndsWith,
+    /// Contains the text anywhere.
+    Contains,
+    /// Matches the text as a regular expression.
+    Regex,
+}
+
+impl MatchType {
+    /// The wire spelling: `prefix`, `endsWith`, `contains`, `regex`.
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            MatchType::Prefix => "prefix",
+            MatchType::EndsWith => "endsWith",
+            MatchType::Contains => "contains",
+            MatchType::Regex => "regex",
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 // ---------------------------------------------------------------------------------------------
 // Buckets
 // ---------------------------------------------------------------------------------------------
@@ -43,13 +79,32 @@ pub struct Bucket {
     pub stopped: bool,
     /// Whether the bucket keeps earlier versions of an object when it is overwritten.
     pub versioning: bool,
-    /// Non-current versions kept per key; 0 keeps every version.
+    /// Non-current versions kept per key; 0 keeps every version. The oldest beyond it are
+    /// deleted, file and all, when an upload adds another - see
+    /// [`Esm::set_bucket_max_versions`](super::Esm::set_bucket_max_versions).
     #[serde(deserialize_with = "lenient_u64")]
     pub max_versions: u64,
     #[serde(deserialize_with = "lenient_string")]
     pub created: Option<String>,
     #[serde(deserialize_with = "lenient_string")]
     pub modified: Option<String>,
+}
+
+/// Body of `create-bucket`, for [`Esm::create_bucket_with`](super::Esm::create_bucket_with).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateBucketRequest {
+    pub name: String,
+    /// Priority given to the notifications the bucket sends (`"LOW"`, `"MEDIUM"` or `"HIGH"`), or
+    /// `None` to leave it to the target queue. The bucket itself does nothing with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    /// Create the bucket as one of euclid's own internal ones, left out of ordinary listings from
+    /// the moment it exists - the flag [`Esm::set_bucket_internal`](super::Esm::set_bucket_internal)
+    /// sets later, without the window in which the bucket shows up in every listing. Internal
+    /// buckets cannot have lifecycle rules. Not sent when `false`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub internal: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -73,25 +128,39 @@ pub struct DeleteBucketResponse {
     pub is_async: bool,
 }
 
-/// Paging and sorting for `list-buckets`.
+/// Paging, sorting and filtering for `list-buckets`.
+///
+/// `match_type` and `include_internal` are left out of the request when unset, so a listing that
+/// uses neither sends exactly what it always did.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListBucketsRequest {
+    /// The text bucket names are matched against; empty for every bucket.
     pub prefix: String,
+    /// How `prefix` is matched; `None` for a plain prefix match. A regex that does not compile is
+    /// refused with HTTP 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
     pub sort_direction: SortDirection,
+    /// List euclid's own internal buckets as well. Honoured for EAM administrators only; anyone
+    /// else gets the ordinary listing rather than an error.
+    #[serde(skip_serializing_if = "is_false")]
+    pub include_internal: bool,
 }
 
 impl Default for ListBucketsRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
             sort_direction: SortDirection::Asc,
+            include_internal: false,
         }
     }
 }
@@ -269,7 +338,10 @@ pub struct EsmObject {
     pub created: Option<String>,
     #[serde(deserialize_with = "lenient_string")]
     pub modified: Option<String>,
-    /// When the object was last read, which is what lifecycle rules go by.
+    /// When the object was last used: its last read, or its last modification while nothing has
+    /// read it yet. This is the clock a lifecycle rule's `archive_after_days` runs against. Reads
+    /// are recorded coarsely (about once an hour by default) - good enough for a rule that
+    /// decides in days, not for an access log.
     #[serde(deserialize_with = "lenient_string")]
     pub last_accessed: Option<String>,
     /// `"STANDARD"` or `"ARCHIVED"`.
@@ -389,16 +461,34 @@ pub struct VerifyObjectsResponse {
 }
 
 /// Paging, sorting and filtering for `list-objects`.
+///
+/// `match_type` and `delimiter` are left out of the request when unset, so a listing that uses
+/// neither sends exactly what it always did.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListObjectsRequest {
     pub bucket_ern: String,
+    /// The text keys are matched against - by default, objects whose key starts with it. With a
+    /// `delimiter`, the level to list instead, which has to end in `"/"` (or be empty for the top
+    /// level).
     pub prefix: String,
+    /// How `prefix` is matched; `None` for a plain prefix match. Only [`MatchType::Prefix`] goes
+    /// with a delimiter - a level is a path, not a search - and anything else is refused with
+    /// HTTP 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
     pub sort_direction: SortDirection,
     pub include_directories: bool,
+    /// `"/"` to list one level rather than a whole subtree, or `None`. With it the answer is the
+    /// objects whose parent is exactly `prefix`, and the directories one step below come back
+    /// separately in [`ListObjectsResponse::common_prefixes`] - the S3 convention. Only `"/"` is
+    /// accepted, and a level is always sorted by key: `sort_column` is ignored, `sort_direction`
+    /// is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delimiter: Option<String>,
 }
 
 impl Default for ListObjectsRequest {
@@ -406,11 +496,13 @@ impl Default for ListObjectsRequest {
         Self {
             bucket_ern: String::new(),
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
             sort_direction: SortDirection::Asc,
             include_directories: false,
+            delimiter: None,
         }
     }
 }
@@ -419,15 +511,23 @@ impl Default for ListObjectsRequest {
 #[serde(rename_all = "camelCase", default)]
 pub struct ListObjectsResponse {
     pub objects: Vec<EsmObject>,
+    /// Objects matching the request across all pages; the directories in `common_prefixes` are
+    /// not counted.
     #[serde(deserialize_with = "lenient_u64")]
     pub total: u64,
+    /// For a one-level listing (a `delimiter` of `"/"`), the directories one step below that
+    /// level, each ending in `"/"`; empty otherwise. Derived from the keys rather than stored,
+    /// and not paged.
+    pub common_prefixes: Vec<String>,
 }
 
+/// Answer to `delete-objects`, by key ([`Esm::delete_objects`](super::Esm::delete_objects)) or by
+/// prefix ([`Esm::delete_objects_by_prefix`](super::Esm::delete_objects_by_prefix)).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DeleteObjectsResponse {
     pub ern: Option<String>,
-    /// Keys asked to be deleted.
+    /// Keys asked to be deleted; 0 for a delete by prefix.
     #[serde(deserialize_with = "lenient_u64")]
     pub asked: u64,
     /// Objects actually deleted (or taken on, when `is_async`).
@@ -435,6 +535,12 @@ pub struct DeleteObjectsResponse {
     pub objects: u64,
     #[serde(rename = "async")]
     pub is_async: bool,
+    /// The prefix deleted under, for a delete by prefix; `None` for a delete by key.
+    pub prefix: Option<String>,
+    /// The background job doing the work, for a delete by prefix taken on asynchronously; `None`
+    /// otherwise, since a delete by key in the background is not a recorded job.
+    #[serde(deserialize_with = "lenient_string")]
+    pub job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
