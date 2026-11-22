@@ -167,6 +167,12 @@ and `start_topic` releases the backlog. Also: `list_messages`/`get_message`/`get
 so subscribers must be idempotent), tags, `set_topic_max_message_length`, `purge_topic`, and
 `list_subscriptions`/`unsubscribe`.
 
+`ListTopicsRequest::match_type` says how `prefix` is matched (`"prefix"`, the default when empty,
+`"endsWith"`, `"contains"` or `"regex"`); the text is taken literally for all but `"regex"`, and an
+unknown type or a bad regex is a 400. `purge_topic_with(ern, true)` answers 202 at once with the
+messages the topic held when the purge was taken on. `Topic::send`/`resend` are lifetime totals
+that, unlike `messages`, do not fall on a purge.
+
 ### ESM object storage
 
 ```rust

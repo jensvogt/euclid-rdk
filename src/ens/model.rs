@@ -93,11 +93,21 @@ impl Topic {
     }
 }
 
-/// Paging and sorting for `list-topics`.
+/// Paging, sorting and filtering for `list-topics`.
+///
+/// The name filter is `prefix`, and `match_type` says how it is compared. Both are carried as the
+/// server reads them rather than folded into one pattern, so a literal `"orders.v1"` means exactly
+/// that for every type but `"regex"` - there is nothing to escape.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTopicsRequest {
+    /// The text topic names are matched against; empty matches every topic.
     pub prefix: String,
+    /// How `prefix` is matched: `"prefix"`, `"endsWith"`, `"contains"` or `"regex"` (an
+    /// ECMAScript regular expression). Empty, the default, leaves it to the server, which reads it
+    /// as `"prefix"`. An invalid regular expression or an unknown match type is refused with HTTP
+    /// 400 rather than matching nothing, so a typo cannot pass for an account without topics.
+    pub match_type: String,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -108,6 +118,7 @@ impl Default for ListTopicsRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: String::new(),
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
