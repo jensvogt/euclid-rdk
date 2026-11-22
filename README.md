@@ -136,6 +136,14 @@ and trusts a zero only for 10 s (`zero_count_trust`). Also: `list_queues`, `get_
 `redrive_dlq`, tags, message attributes and `update_message_body`. Queue names resolve within the
 session's namespace; an ERN always works.
 
+`ListQueuesRequest::match_type` says how `prefix` is matched (`"prefix"`, the default when empty,
+`"endsWith"`, `"contains"` or `"regex"`); an unknown type or a bad regex is a 400. A service in the
+middle of a chain hands the received `Message::system_attributes` on in
+`SendMessageRequest::system_attributes`, so a correlation id identifies the whole chain.
+`delete_queue_if_empty` refuses (409) a queue that still holds messages or has deliveries on their
+way into it. `purge_queue_with(ern, true)` answers 202 at once with the messages there were when
+the purge was accepted - for a backlog too large to empty within the gateway's timeout.
+
 ### ENS topics
 
 ```rust
