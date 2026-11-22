@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.5](https://github.com/jensvogt/euclid-rdk/compare/euclid-rdk-v0.1.4...euclid-rdk-v0.1.5) (2026-11-22)
+
+
+### Features
+
+* **eag:** route match types, is_upload_route, absent route type reads as PROXY ([8537fcb](https://github.com/jensvogt/euclid-rdk/commit/8537fcbd960302c48c77cf0d803b1a0a70d15a09))
+* **eam:** OIDC/SAML browser login, listing match types, describe_permissions ([f0a82fb](https://github.com/jensvogt/euclid-rdk/commit/f0a82fba737eee4956b15eb2d9b98420410e7129))
+* **eap:** node draining, instance assignment, topic/secret grants, limits, forced redeploy, match types ([92e2a76](https://github.com/jensvogt/euclid-rdk/commit/92e2a768fea459b1d03fc5b6c29d9d79a19f1e5c))
+* EDS domain name service module ([3695266](https://github.com/jensvogt/euclid-rdk/commit/369526602efd6559c0e034f59faa9b33317b34cf))
+* EDS module and sync with euclid-jdk 0.1.61 ([ae3f867](https://github.com/jensvogt/euclid-rdk/commit/ae3f867023dcfc9b67d2ae53cc382e4026f43d14))
+* **ekv:** list-tables match type, explicit unnarrowed scan ([2948e7c](https://github.com/jensvogt/euclid-rdk/commit/2948e7c17639fd69e4a10289afaa60bafa17bf5e))
+* **emo:** align series queries and dashboards with the JDK ([8c55668](https://github.com/jensvogt/euclid-rdk/commit/8c55668d2dfd6c8d09ff41ae4911c73992d89c8e))
+* **ens:** list-topics match type, empty purge-topic answers read as done ([baf6efe](https://github.com/jensvogt/euclid-rdk/commit/baf6efe0d25a71fb68cf1141c58a80dd11c0b567))
+* **eqs:** list-queues match type, system attributes on send, empty purge answers ([cbe887e](https://github.com/jensvogt/euclid-rdk/commit/cbe887e8fef14b446c68e2464e1524fed34e2c70))
+* **esm:** match types, one-level listings, internal buckets, delete-if-empty and delete by prefix ([3fa6d55](https://github.com/jensvogt/euclid-rdk/commit/3fa6d552ddfeec825d924a1b4365d47d63f8b4a4))
+* **ess,ekm:** match type for list-secrets, list-keys and list-certificates ([9c4c026](https://github.com/jensvogt/euclid-rdk/commit/9c4c0267be26e98d2185846801a6ddc99fb2d1c3))
+* **ets:** list servers by match type ([d414e42](https://github.com/jensvogt/euclid-rdk/commit/d414e42d3315aebf3977bfb5184a3eaadf7c5934))
+
 ## [0.1.4](https://github.com/jensvogt/euclid-rdk/compare/euclid-rdk-v0.1.3...euclid-rdk-v0.1.4) (2026-11-07)
 
 
