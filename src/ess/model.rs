@@ -5,6 +5,7 @@
 //!
 //! Secret values never appear in `Debug` output: every type that carries one redacts it.
 
+use crate::MatchType;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -134,11 +135,18 @@ impl fmt::Debug for GetSecretResponse {
     }
 }
 
-/// Paging and sorting for `list-secrets`.
+/// Paging, sorting and filtering for `list-secrets`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListSecretsRequest {
+    /// Only secrets whose name matches this text, the way `match_type` says; empty matches every
+    /// one.
     pub prefix: String,
+    /// How `prefix` is matched against the names; `None` (the default) is
+    /// [`MatchType::Prefix`]. A regular expression the server cannot compile is refused with
+    /// HTTP 400 rather than quietly matching nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -149,6 +157,7 @@ impl Default for ListSecretsRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),

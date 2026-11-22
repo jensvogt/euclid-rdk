@@ -117,7 +117,8 @@ async fn list_topics_sends_defaults_and_parses_topics() {
     let response = ens.list_topics(&ListTopicsRequest::default()).await.unwrap();
     assert_eq!(
         body(&seen),
-        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name", "sortDirection": "asc" })
+        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
+                "sortDirection": "asc" })
     );
     assert_eq!(response.total, 2);
     let topic = &response.topics[0];
@@ -485,4 +486,71 @@ async fn purge_topic_asynchronously() {
     assert_eq!(body(&purge), json!({ "ern": TOPIC, "async": true }));
     assert!(answer.is_async);
     assert_eq!(answer.messages, 42);
+}
+
+#[tokio::test]
+async fn list_topics_sends_the_match_type_with_the_text() {
+    let server = MockServer::start().await;
+    let ens = ens(&server, true).await;
+    let seen = mount(&server, "list-topics", json!({ "topics": [], "total": 0 })).await;
+
+    ens.list_topics(&ListTopicsRequest {
+        prefix: ".v1".into(),
+        match_type: Some(euclid_rdk::MatchType::EndsWith),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let sent = body(&seen);
+    assert_eq!(sent["prefix"], ".v1");
+    assert_eq!(sent["matchType"], "endsWith");
+}
+
+#[tokio::test]
+async fn purge_topic_inline_asks_for_no_background_work() {
+    let server = MockServer::start().await;
+    let ens = ens(&server, true).await;
+    let purge = mount(&server, "purge-topic", json!({ "ern": TOPIC, "async": false })).await;
+
+    ens.purge_topic(TOPIC).await.unwrap();
+    assert_eq!(body(&purge), json!({ "ern": TOPIC, "async": false }));
+
+    let answer = ens.purge_topic_with(TOPIC, false).await.unwrap();
+    assert_eq!(answer.ern.as_deref(), Some(TOPIC));
+    assert!(!answer.is_async);
+    assert_eq!(answer.messages, 0);
+}
+
+#[tokio::test]
+async fn purge_topic_in_the_background_is_answered_with_202() {
+    let server = MockServer::start().await;
+    let ens = ens(&server, true).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "purge-topic"))
+        .respond_with(
+            ResponseTemplate::new(202).set_body_json(json!({ "ern": TOPIC, "async": true, "messages": 5000 })),
+        )
+        .mount(&server)
+        .await;
+
+    let answer = ens.purge_topic_with(TOPIC, true).await.unwrap();
+    assert!(answer.is_async);
+    assert_eq!(answer.messages, 5000);
+}
+
+#[tokio::test]
+async fn purge_topic_answered_with_an_empty_body_is_a_finished_purge() {
+    // An older server answered a purge with no body at all; that still means it is done.
+    let server = MockServer::start().await;
+    let ens = ens(&server, true).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "purge-topic"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let answer = ens.purge_topic_with(TOPIC, false).await.unwrap();
+    assert_eq!(answer.ern.as_deref(), Some(TOPIC));
+    assert!(!answer.is_async);
+    ens.purge_topic(TOPIC).await.unwrap();
 }

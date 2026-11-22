@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use euclid_rdk::ekm::{
-    CreateCertificateRequest, CreateKeyRequest, ImportCertificateRequest, ListKeysRequest, Sensitive,
+    CreateCertificateRequest, CreateKeyRequest, ImportCertificateRequest, ListCertificatesRequest, ListKeysRequest,
+    Sensitive,
 };
 use euclid_rdk::{Eam, Ekm, Error};
 use serde_json::{json, Value};
@@ -158,7 +159,8 @@ async fn list_and_get_keys_parse_and_address_by_name_or_ern() {
     let keys = ekm.list_keys(&ListKeysRequest::default()).await.unwrap();
     assert_eq!(
         body(&list),
-        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name", "sortDirection": "asc" })
+        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
+                "sortDirection": "asc" })
     );
     assert_eq!(keys.total, 1);
     let key = &keys.keys[0];
@@ -363,4 +365,52 @@ fn debug_output_redacts_private_keys_and_data() {
     let printed = format!("{data:?}");
     assert!(!printed.contains("TOPSECRET"), "{printed}");
     assert_eq!(printed, "Sensitive(<redacted 9 bytes>)");
+}
+
+#[tokio::test]
+async fn list_keys_sends_the_match_type() {
+    let server = MockServer::start().await;
+    let ekm = ekm(&server, true).await;
+    let seen = mount(&server, "list-keys", json!({ "keys": [], "total": 4 })).await;
+
+    let listed = ekm
+        .list_keys(&ListKeysRequest {
+            prefix: "-prod".into(),
+            match_type: Some(euclid_rdk::MatchType::EndsWith),
+            page_size: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let sent = body(&seen);
+    assert_eq!(sent["prefix"], "-prod");
+    assert_eq!(sent["matchType"], "endsWith");
+    assert_eq!(sent["pageSize"], 50);
+    assert_eq!(sent["sortColumn"], "name");
+    assert_eq!(listed.total, 4);
+}
+
+#[tokio::test]
+async fn list_certificates_sends_the_match_type() {
+    let server = MockServer::start().await;
+    let ekm = ekm(&server, true).await;
+    let seen = mount(
+        &server,
+        "list-certificates",
+        json!({ "certificates": [certificate_json()], "total": 1 }),
+    )
+    .await;
+
+    let listed = ekm
+        .list_certificates(&ListCertificatesRequest {
+            prefix: "^c(1)?$".into(),
+            match_type: Some(euclid_rdk::MatchType::Regex),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let sent = body(&seen);
+    assert_eq!(sent["prefix"], "^c(1)?$");
+    assert_eq!(sent["matchType"], "regex");
+    assert_eq!(listed.certificates[0].name.as_deref(), Some("c1"));
 }

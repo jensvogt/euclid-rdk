@@ -4,6 +4,7 @@
 //! the server leaves out reads as `None`/zero/empty instead of failing the whole response. Request
 //! types send every field, `null` included, the way euclid-jdk's default mapper does.
 
+use crate::MatchType;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -109,11 +110,18 @@ pub struct CreateKeyResponse {
     pub status: Option<String>,
 }
 
-/// Paging and sorting for `list-keys` and `list-certificates`.
+/// Paging, sorting and filtering for `list-keys` and `list-certificates`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListRequest {
+    /// Only keys or certificates whose name matches this text, the way `match_type` says; empty matches every
+    /// one.
     pub prefix: String,
+    /// How `prefix` is matched against the names; `None` (the default) is
+    /// [`MatchType::Prefix`]. A regular expression the server cannot compile is refused with
+    /// HTTP 400 rather than quietly matching nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -124,6 +132,7 @@ impl Default for ListRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
@@ -132,9 +141,9 @@ impl Default for ListRequest {
     }
 }
 
-/// Paging and sorting for `list-keys`.
+/// Paging, sorting and filtering for `list-keys`.
 pub type ListKeysRequest = ListRequest;
-/// Paging and sorting for `list-certificates`.
+/// Paging, sorting and filtering for `list-certificates`.
 pub type ListCertificatesRequest = ListRequest;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

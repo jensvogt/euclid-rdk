@@ -66,6 +66,8 @@ impl Ekv {
         }
     }
 
+    /// Lists tables. [`match_type`](ListTablesRequest::match_type) finds a name that ends with,
+    /// contains or matches a pattern rather than one that starts with `prefix`.
     pub async fn list_tables(&self, request: &ListTablesRequest) -> Result<ListTablesResponse> {
         self.client.call("list-tables", request).await
     }
@@ -150,20 +152,29 @@ impl Ekv {
         })
     }
 
-    /// Reads a table page by page, in no particular order. A page size of 0 returns every item.
+    /// Reads a table page by page, in key order and unnarrowed. A page size of 0 returns every
+    /// item.
     pub async fn scan(&self, table: &str, page_size: u64, page_index: u64) -> Result<ScanResponse> {
-        let body = json!({ "table": table, "pageSize": page_size, "pageIndex": page_index });
-        self.do_scan(&body).await
+        self.scan_with(&ScanRequest {
+            table: table.into(),
+            page_size,
+            page_index,
+            ..Default::default()
+        })
+        .await
     }
 
     /// Scans a table with ordering and filters: by when an item was last written, and by a
-    /// condition on any attribute. An invalid timestamp or operator is refused with 400.
+    /// condition on any attribute.
+    ///
+    /// Narrowing is done by the server, which saves the wire and the sifting but not the read:
+    /// this is still a scan. [`ScanResponse::total`] keeps counting the whole table, so page until
+    /// fewer items come back than were asked for. Refused with 400 for a timestamp that is not
+    /// ISO-8601, a `modified_to` before `modified_from`, an attribute named without an operator or
+    /// an operator without an attribute, and [`SortOperator::BeginsWith`] against anything but a
+    /// string.
     pub async fn scan_with(&self, request: &ScanRequest) -> Result<ScanResponse> {
-        self.do_scan(request).await
-    }
-
-    async fn do_scan(&self, body: &impl Serialize) -> Result<ScanResponse> {
-        let raw: RawItems = self.client.call("scan", body).await?;
+        let raw: RawItems = self.client.call("scan", request).await?;
         Ok(ScanResponse {
             count: raw.count.unwrap_or(raw.items.len() as u64),
             total: raw.total.unwrap_or_default(),

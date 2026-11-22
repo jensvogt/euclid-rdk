@@ -27,6 +27,7 @@ pub mod ead;
 pub mod eag;
 pub mod eam;
 pub mod eap;
+pub mod eds;
 pub mod ees;
 pub mod ekm;
 pub mod ekv;
@@ -39,6 +40,7 @@ pub mod esm;
 pub mod ess;
 pub mod ets;
 mod http;
+mod match_type;
 mod serde_util;
 mod service;
 mod variant;
@@ -47,6 +49,7 @@ pub use ead::Ead;
 pub use eag::Eag;
 pub use eam::{Eam, Session};
 pub use eap::Eap;
+pub use eds::Eds;
 pub use ees::Ees;
 pub use ekm::Ekm;
 pub use ekv::Ekv;
@@ -58,6 +61,7 @@ pub use error::{Error, Result};
 pub use esm::Esm;
 pub use ess::Ess;
 pub use ets::Ets;
+pub use match_type::MatchType;
 pub use variant::Variant;
 
 /// Main entry point for talking to an Euclid server, e.g.
@@ -147,6 +151,11 @@ impl Euclid {
     /// EAD operations using the cached session for this server (see [`Euclid::session`]).
     pub async fn ead(&self) -> Result<Ead> {
         Ok(self.session().await?.ead())
+    }
+
+    /// EDS operations using the cached session for this server (see [`Euclid::session`]).
+    pub async fn eds(&self) -> Result<Eds> {
+        Ok(self.session().await?.eds())
     }
 
     /// EMM operations using the cached session for this server (see [`Euclid::session`]).

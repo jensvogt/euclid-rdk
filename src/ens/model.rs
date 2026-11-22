@@ -3,6 +3,7 @@
 //! Field names are the wire names in camelCase. Response types default every field, so a field
 //! the server leaves out reads as `None`/zero instead of failing the whole response.
 
+use crate::MatchType;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -93,11 +94,21 @@ impl Topic {
     }
 }
 
-/// Paging and sorting for `list-topics`.
+/// Paging, sorting and filtering for `list-topics`.
+///
+/// The name filter is `prefix`, and `match_type` says how it is compared. Both are carried as the
+/// server reads them rather than folded into one pattern, so a literal `"orders.v1"` means exactly
+/// that for every type but `"regex"` - there is nothing to escape.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTopicsRequest {
+    /// The text topic names are matched against; empty matches every topic.
     pub prefix: String,
+    /// How `prefix` is matched against the names; `None` (the default) is
+    /// [`MatchType::Prefix`]. A regular expression the server cannot compile is refused with
+    /// HTTP 400 rather than quietly matching nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -108,6 +119,7 @@ impl Default for ListTopicsRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),

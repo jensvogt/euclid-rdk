@@ -4,6 +4,7 @@
 //! the server keeps its default (create) or the current value (update) for those. Responses
 //! default every field, so one the server leaves out reads as `None`/zero/empty.
 
+use crate::MatchType;
 use serde::{Deserialize, Serialize};
 
 use crate::serde_util::{lenient_string, lenient_u64};
@@ -86,14 +87,18 @@ pub struct CreateServerRequest {
     pub bucket: Option<String>,
     /// Address to bind to; `0.0.0.0` by default.
     pub address: String,
-    /// Key prefix template, e.g. `"{user}"`, or empty for the bucket root.
+    /// Key prefix template each client's session is rooted at, `{user}` standing for the EAM user
+    /// ID that logged in. `None` takes the server's default `"{user}"` - a home of each client's
+    /// own; `Some("")` deliberately puts every client in one shared key space at the bucket root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub home_directory: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_groups: Option<Vec<String>>,
-    /// Paths relative to the home prefix, created at login.
+    /// Directories every session should find under its home, relative to the home prefix and
+    /// created at login, intermediate levels included - an inbox to deliver into, say, since a
+    /// client cannot be asked to create the folder it delivers into.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directories: Option<Vec<String>>,
     /// SFTP only: private SSH host key file, generated on first start if absent.
@@ -138,12 +143,16 @@ pub struct UpdateServerRequest {
     pub port: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bucket: Option<String>,
+    /// The new key prefix template (`{user}` = the EAM user ID); `Some("")` moves the server back
+    /// to one shared key space at the bucket root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub home_directory: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_groups: Option<Vec<String>>,
+    /// Directories every session should find under its home, created at login, replacing the
+    /// current list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directories: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,6 +161,24 @@ pub struct UpdateServerRequest {
     pub pasv_min: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pasv_max: Option<u64>,
+}
+
+/// Body of `list-servers`: the transfer servers of the session's account and namespace whose ID
+/// matches `prefix` the way `match_type` says.
+///
+/// Every match type but `"regex"` treats the text literally, so `"a.b"` does not also find
+/// `"aXb"`. An unknown match type, or a regular expression that does not compile, is refused with
+/// 400.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListServersRequest {
+    /// The text server IDs are matched against; empty returns every server. Only a prefix under
+    /// the default match type.
+    pub prefix: String,
+    /// How `prefix` is matched; `None` is not sent and means [`MatchType::Prefix`], as every
+    /// listing did before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -9,8 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use euclid_rdk::eap::{
-    ApplicationType, CreateApplicationRequest, EgressLimiter, EgressTimeout, ScaleApplicationRequest,
-    SetApplicationLimitsRequest, UpdateApplicationRequest,
+    ApplicationType, AssignInstanceRequest, CreateApplicationRequest, EgressLimiter, EgressLimits, EgressTimeout,
+    ListApplicationsRequest, RedeployApplicationRequest, ScaleApplicationRequest, SetApplicationLimitsRequest,
+    UpdateApplicationRequest,
 };
 use euclid_rdk::{Eam, Eap, Error};
 use serde_json::{json, Value};
@@ -606,4 +607,402 @@ async fn limiter_run_releases_and_throttled_never_fails() {
 
 async fn limiter_eap(server: &MockServer) -> Eap {
     eap(server, false).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Topics, secrets, limits, moves, forced redeploys, match types
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_application_sends_topics_secrets_and_limits() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let created = mount(&server, "create-application", application_json()).await;
+
+    eap.create_application(&CreateApplicationRequest {
+        application_id: Some("billing".into()),
+        runtime: Some("RUST".into()),
+        bucket: Some("artifacts".into()),
+        artifact: Some("billing-1.0.0".into()),
+        topics: Some(vec!["invoices-issued".into()]),
+        secrets: Some(vec!["db-credentials".into()]),
+        memory_limit_mb: Some(512),
+        cpu_limit: Some(1.5),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        bodies(&created),
+        [json!({
+            "applicationId": "billing", "runtime": "RUST", "bucket": "artifacts",
+            "artifact": "billing-1.0.0", "topics": ["invoices-issued"],
+            "secrets": ["db-credentials"], "memoryLimitMb": 512, "cpuLimit": 1.5
+        })]
+    );
+}
+
+// A declaration that could not be applied does not fail the deployment, so the report has to be
+// readable from the answer - and it names the application it was nested in.
+#[tokio::test]
+async fn create_application_reports_what_its_declaration_did() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let mut applied = application_json();
+    applied["infrastructure"] = json!({
+        "declared": true, "dryRun": false,
+        "created": ["ern:eqs:eu-central-1:000000000000:queue/billing-events"],
+        "adopted": [], "updated": [], "deleted": [], "kept": [], "granted": [], "revoked": []
+    });
+    mount(&server, "create-application", applied).await;
+
+    let created = eap
+        .create_application(&CreateApplicationRequest {
+            application_id: Some("billing".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let report = created.infrastructure.expect("an infrastructure report");
+    assert!(report.declared);
+    assert_eq!(report.error, None);
+    assert_eq!(report.application_id.as_deref(), Some("billing"));
+    assert_eq!(
+        report.created,
+        ["ern:eqs:eu-central-1:000000000000:queue/billing-events"]
+    );
+}
+
+#[tokio::test]
+async fn create_application_reports_a_declaration_that_could_not_be_applied() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let mut failed = application_json();
+    failed["infrastructure"] = json!({ "declared": false, "error": "not valid JSON" });
+    mount(&server, "create-application", failed).await;
+
+    let created = eap
+        .create_application(&CreateApplicationRequest::default())
+        .await
+        .unwrap();
+    let report = created.infrastructure.unwrap();
+    assert_eq!(report.error.as_deref(), Some("not valid JSON"));
+    assert!(!report.declared);
+}
+
+// Only create-application applies a declaration while answering; nothing else may read as
+// "applied nothing".
+#[tokio::test]
+async fn an_application_from_any_other_action_has_no_infrastructure_report() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    mount(&server, "get-application", application_json()).await;
+
+    let found = eap.get_application("billing").await.unwrap();
+    assert_eq!(found.infrastructure, None);
+    assert_eq!(found.artifact_size, 1_048_576);
+}
+
+#[tokio::test]
+async fn update_application_can_move_change_user_and_set_limits() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let updated = mount(&server, "update-application", application_json()).await;
+
+    eap.update_application(&UpdateApplicationRequest {
+        application_id: Some("billing".into()),
+        namespace: Some(String::new()),
+        user: Some("billing-operator".into()),
+        memory_limit_mb: Some(0),
+        cpu_limit: Some(2.0),
+        topics: Some(vec!["invoices-issued".into()]),
+        secrets: Some(vec!["db-credentials".into()]),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // An empty namespace is a move to the account root, so it is sent rather than dropped.
+    assert_eq!(
+        bodies(&updated),
+        [json!({
+            "applicationId": "billing", "namespace": "", "user": "billing-operator",
+            "memoryLimitMb": 0, "cpuLimit": 2.0, "topics": ["invoices-issued"],
+            "secrets": ["db-credentials"]
+        })]
+    );
+}
+
+#[tokio::test]
+async fn redeploy_sends_force_only_when_set() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let redeployed = mount(&server, "redeploy-application", application_json()).await;
+
+    eap.redeploy_application(&RedeployApplicationRequest {
+        application_id: Some("billing".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    eap.redeploy_application(&RedeployApplicationRequest {
+        application_id: Some("billing".into()),
+        force: Some(true),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        bodies(&redeployed),
+        [
+            json!({ "applicationId": "billing" }),
+            json!({ "applicationId": "billing", "force": true }),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn list_applications_can_match_other_than_a_prefix() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let listed = mount(
+        &server,
+        "list-applications",
+        json!({ "applications": [application_json()] }),
+    )
+    .await;
+
+    let found = eap
+        .list_applications_with(&ListApplicationsRequest {
+            prefix: "ill".into(),
+            match_type: Some(euclid_rdk::MatchType::Contains),
+        })
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    // A plain prefix search keeps sending no match type, as an older client did.
+    eap.list_applications_with_prefix("bill").await.unwrap();
+
+    assert_eq!(
+        bodies(&listed),
+        [
+            json!({ "prefix": "ill", "matchType": "contains" }),
+            json!({ "prefix": "bill" }),
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Draining and assigning
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_node_reports_its_load_average() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    mount(
+        &server,
+        "list-nodes",
+        json!({ "nodes": [{ "name": "worker-1", "memoryMb": 28672, "memoryTotalMb": 32768,
+                            "memoryUsedMb": 12288, "loadAverage": 1.75 }, { "name": "n2" }], "total": 2 }),
+    )
+    .await;
+
+    let nodes = eap.list_nodes().await.unwrap().nodes;
+    assert_eq!(nodes[0].load_average, 1.75);
+    assert_eq!(nodes[0].memory_used_mb, 12288);
+    assert_eq!(nodes[1].load_average, 0.0);
+}
+
+#[tokio::test]
+async fn drain_node_sends_the_name_and_the_flag() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let drained = mount(&server, "drain-node", json!({ "node": "worker-1", "drained": true })).await;
+
+    let response = eap.drain_node("worker-1").await.unwrap();
+    assert_eq!(response.node.as_deref(), Some("worker-1"));
+    assert!(response.drained);
+    assert_eq!(bodies(&drained), [json!({ "node": "worker-1", "drained": true })]);
+}
+
+// false is the only way back into service - the server reads an absent flag as "drain".
+#[tokio::test]
+async fn undraining_a_node_sends_false() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let undrained = mount(&server, "drain-node", json!({ "node": "worker-1" })).await;
+
+    let response = eap.set_node_drained("worker-1", false).await.unwrap();
+    assert!(!response.drained, "an answer without the flag reads as what was asked");
+    assert_eq!(bodies(&undrained), [json!({ "node": "worker-1", "drained": false })]);
+}
+
+#[tokio::test]
+async fn drain_node_surfaces_a_node_that_is_not_registered() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    mount_status(
+        &server,
+        "drain-node",
+        404,
+        json!({ "error": "Node is not registered, node: nope" }),
+    )
+    .await;
+
+    let err = eap.drain_node("nope").await.unwrap_err();
+    assert_eq!(err.status(), Some(404));
+    assert!(err.to_string().starts_with("eap drain-node failed with status 404"));
+}
+
+#[tokio::test]
+async fn assign_instance_names_the_slot_by_pool_and_parses_the_lease() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let assigned = mount(
+        &server,
+        "assign-instance",
+        json!({ "runtimeName": "billing-7f3a91", "instanceId": "i-1", "node": "worker-1",
+                "leaseExpiresAt": "2026-11-22T12:00:45Z" }),
+    )
+    .await;
+
+    let response = eap
+        .assign_instance(&AssignInstanceRequest {
+            runtime_name: "billing-7f3a91".into(),
+            instance_id: "i-1".into(),
+            node: "worker-1".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.node.as_deref(), Some("worker-1"));
+    assert_eq!(response.lease_expires_at.as_deref(), Some("2026-11-22T12:00:45Z"));
+    assert_eq!(
+        bodies(&assigned),
+        [json!({ "runtimeName": "billing-7f3a91", "instanceId": "i-1", "node": "worker-1" })]
+    );
+}
+
+// No node is a request in its own right: the slot goes back to the manager's own host.
+#[tokio::test]
+async fn assign_instance_without_a_node_takes_the_slot_back() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    let assigned = mount(
+        &server,
+        "assign-instance",
+        json!({ "runtimeName": "billing-7f3a91", "instanceId": "i-1", "node": "",
+                "leaseExpiresAt": "2026-11-22T12:00:45Z" }),
+    )
+    .await;
+
+    let response = eap
+        .assign_instance(&AssignInstanceRequest {
+            runtime_name: "billing-7f3a91".into(),
+            instance_id: "i-1".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.node.as_deref(), Some(""));
+    assert_eq!(bodies(&assigned)[0]["node"], json!(""));
+}
+
+#[tokio::test]
+async fn assign_instance_surfaces_a_drained_node() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    mount_status(
+        &server,
+        "assign-instance",
+        409,
+        json!({ "error": "Node 'worker-1' is drained" }),
+    )
+    .await;
+
+    let err = eap
+        .assign_instance(&AssignInstanceRequest {
+            runtime_name: "billing-7f3a91".into(),
+            instance_id: "i-1".into(),
+            node: "worker-1".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), Some(409));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Egress answers
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn egress_answers_carry_the_limits_and_the_block() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    mount(
+        &server,
+        "acquire-egress-permit",
+        json!({ "applicationId": "downloader", "site": "downloads.example.com", "granted": false,
+                "reason": "rate", "retryAfterMs": 250,
+                "limits": { "requestsPerSecond": 2.0, "burst": 4.0, "concurrent": 1 } }),
+    )
+    .await;
+    let throttled = mount(
+        &server,
+        "report-egress-throttled",
+        json!({ "applicationId": "downloader", "site": "downloads.example.com",
+                "blockedUntil": "2026-10-16T12:00:00Z" }),
+    )
+    .await;
+
+    let answer = eap
+        .acquire_egress_permit("downloader", "downloads.example.com", 600)
+        .await
+        .unwrap();
+    assert!(!answer.granted);
+    assert_eq!(answer.retry_after_ms, 250);
+    // What the refusal was decided under, so a caller held back can see by what.
+    assert_eq!(answer.application_id.as_deref(), Some("downloader"));
+    assert_eq!(
+        answer.limits,
+        Some(EgressLimits {
+            requests_per_second: 2.0,
+            burst: 4.0,
+            concurrent: 1
+        })
+    );
+
+    let blocked = eap
+        .report_egress_throttled("downloader", "downloads.example.com", 90)
+        .await
+        .unwrap();
+    assert_eq!(blocked.blocked_until.as_deref(), Some("2026-10-16T12:00:00Z"));
+    assert_eq!(blocked.site.as_deref(), Some("downloads.example.com"));
+    assert_eq!(
+        bodies(&throttled),
+        [json!({ "applicationId": "downloader", "site": "downloads.example.com", "retryAfterSeconds": 90 })]
+    );
+}
+
+// An older EAP sends no limits: that must read as "not said", not as all-zero limits.
+#[tokio::test]
+async fn an_egress_permit_without_limits_reads_as_none() {
+    let server = MockServer::start().await;
+    let eap = eap(&server, true).await;
+    mount(
+        &server,
+        "acquire-egress-permit",
+        json!({ "site": "api.example.com", "granted": true, "permitId": "p-1" }),
+    )
+    .await;
+
+    let answer = eap
+        .acquire_egress_permit("billing", "api.example.com", 60)
+        .await
+        .unwrap();
+    assert!(answer.granted);
+    assert_eq!(answer.limits, None);
+    assert_eq!(answer.application_id, None);
 }

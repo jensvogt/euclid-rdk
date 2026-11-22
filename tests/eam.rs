@@ -1,13 +1,18 @@
-//! EAM against a mock server: login, caching, request headers and a few typed operations.
+//! EAM against a mock server: login, caching, request headers, federated login and a few typed
+//! operations.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use euclid_rdk::eam::{GrantRoleRequest, ListUsersRequest};
+use euclid_rdk::eam::{
+    GrantRoleRequest, ListAccountsRequest, ListNamespacesRequest, ListRolesRequest, ListUserGroupsRequest,
+    ListUsersRequest, MatchType, OidcAuthorizeRequest, RegisterRequest, SamlAcsRequest, SamlAuthorizeRequest,
+};
 use euclid_rdk::{Eam, Error};
 use serde_json::{json, Value};
-use wiremock::matchers::{body_json, header, method, path};
+use wiremock::matchers::{body_json, body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 fn jwt(exp_offset: i64) -> String {
@@ -544,4 +549,673 @@ async fn refresh_session_adopts_the_new_token_and_keeps_account_and_namespace() 
     let cached: Value = serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();
     assert_eq!(cached["token"], new.as_str());
     assert_eq!(cached["accountId"], "408066031601");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Federated login
+// ---------------------------------------------------------------------------------------------
+
+/// A login response as EAM answers every way in with it.
+fn federated_login_body() -> Value {
+    json!({
+        "token": "fed-token",
+        "accessKeyId": "AKIAFED",
+        "secretAccessKey": "s3cr3t",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "isAdmin": false,
+        "metadata": { "region": "eu-central-1", "accountId": "863459426936", "user": "carol" }
+    })
+}
+
+/// Plays the browser: follows the URL to wherever it points - in these tests the listener's own
+/// callback - from a task of its own, since the listener only answers once the hook has returned.
+fn visit(url: &str) {
+    let url = url.to_owned();
+    tokio::spawn(async move {
+        let _ = reqwest::get(url).await;
+    });
+}
+
+fn body_of(request: &Request) -> Value {
+    serde_json::from_slice(&request.body).unwrap_or(Value::Null)
+}
+
+/// Answers `oidc-authorize` with an authorization URL that is the listener's own redirect URI with
+/// `query` on it - what a provider's redirect amounts to once the person has signed in - and
+/// records the redirect URI it was given.
+async fn mount_oidc_authorize(server: &MockServer, query: &'static str, state: &'static str) -> Arc<Mutex<String>> {
+    let redirect_uri = Arc::new(Mutex::new(String::new()));
+    let seen = redirect_uri.clone();
+    Mock::given(method("POST"))
+        .and(header("x-euclid-target", "eam"))
+        .and(header("x-euclid-action", "oidc-authorize"))
+        .respond_with(move |request: &Request| {
+            let uri = body_of(request)["redirectUri"].as_str().unwrap_or_default().to_owned();
+            *seen.lock().unwrap() = uri.clone();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "authorizationUrl": format!("{uri}?{query}"),
+                "state": state
+            }))
+        })
+        .mount(server)
+        .await;
+    redirect_uri
+}
+
+#[tokio::test]
+async fn login_with_oidc_redeems_the_code_the_browser_brought_back() {
+    let server = MockServer::start().await;
+    let redirect_uri = mount_oidc_authorize(&server, "code=c0de&state=s3aled", "s3aled").await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "oidc-login"))
+        .and(body_json(json!({ "code": "c0de", "state": "s3aled" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(federated_login_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("credentials");
+
+    let session = Eam::for_server(server.uri())
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .browser(visit)
+        .login_with_oidc()
+        .await
+        .unwrap();
+
+    let redirect_uri = redirect_uri.lock().unwrap().clone();
+    assert!(
+        redirect_uri.starts_with("http://127.0.0.1:"),
+        "the code has to come back to this machine"
+    );
+    assert!(redirect_uri.ends_with("/callback"));
+    assert_eq!(session.token(), "fed-token");
+    assert_eq!(session.user_id(), Some("carol"));
+    assert_eq!(session.access_key_id(), Some("AKIAFED"));
+
+    let cached: Value = serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();
+    assert_eq!(
+        cached["token"], "fed-token",
+        "a federated session is cached like any other"
+    );
+}
+
+// EAM would refuse a state it did not seal anyway, but the code must not even be spent on a
+// callback that belongs to some other login attempt.
+#[tokio::test]
+async fn login_with_oidc_refuses_a_callback_from_another_attempt() {
+    let server = MockServer::start().await;
+    mount_oidc_authorize(&server, "code=c0de&state=somebody-elses", "mine").await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "oidc-login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(federated_login_body()))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let err = Eam::for_server(server.uri())
+        .no_cache()
+        .no_ca_cert()
+        .browser(visit)
+        .login_with_oidc()
+        .await
+        .unwrap_err();
+
+    match err {
+        Error::Authentication { status, body } => {
+            assert_eq!(status, 401);
+            assert!(body.contains("does not belong to this login attempt"), "{body}");
+        }
+        other => panic!("expected an authentication error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn login_with_oidc_surfaces_the_providers_refusal() {
+    let server = MockServer::start().await;
+    mount_oidc_authorize(&server, "error=access_denied&error_description=not+for+you", "s").await;
+
+    let err = Eam::for_server(server.uri())
+        .no_cache()
+        .no_ca_cert()
+        .browser(visit)
+        .login_with_oidc()
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::Authentication { body, .. } if body.contains("access_denied (not for you)")),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn login_with_oidc_gives_up_when_the_browser_never_comes_back() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "oidc-authorize"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authorizationUrl": "https://idp.example.com/authorize",
+            "state": "s"
+        })))
+        .mount(&server)
+        .await;
+
+    let err = Eam::for_server(server.uri())
+        .no_cache()
+        .no_ca_cert()
+        .browser(|_| {})
+        .callback_timeout(Duration::from_millis(200))
+        .login_with_oidc()
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn login_with_oidc_surfaces_a_server_that_cannot_start_the_flow() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "oidc-authorize"))
+        .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"error":"OIDC is not enabled"}"#))
+        .mount(&server)
+        .await;
+
+    let err = Eam::for_server(server.uri())
+        .no_cache()
+        .no_ca_cert()
+        .browser(|_| panic!("the browser must not be needed"))
+        .login_with_oidc()
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::Service { action, status: 404, .. } if action == "oidc-authorize"),
+        "{err:?}"
+    );
+}
+
+// A stray request - a browser asking for the favicon - must not consume the login.
+#[tokio::test]
+async fn the_callback_listener_ignores_requests_that_are_not_the_callback() {
+    let server = MockServer::start().await;
+    mount_oidc_authorize(&server, "code=c&state=s", "s").await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "oidc-login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(federated_login_body()))
+        .mount(&server)
+        .await;
+    let favicon_status = Arc::new(Mutex::new(None));
+    let seen = favicon_status.clone();
+
+    let session = Eam::for_server(server.uri())
+        .no_cache()
+        .no_ca_cert()
+        .browser(move |url| {
+            let url = url.to_owned();
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let favicon = format!("{}/favicon.ico", &url[..url.find("/callback").unwrap()]);
+                let status = reqwest::get(favicon).await.map(|r| r.status().as_u16()).ok();
+                *seen.lock().unwrap() = status;
+                let _ = reqwest::get(url).await;
+            });
+        })
+        .login_with_oidc()
+        .await
+        .unwrap();
+
+    assert_eq!(*favicon_status.lock().unwrap(), Some(404));
+    assert_eq!(session.token(), "fed-token");
+}
+
+// The SAML leg ends differently: EAM posts the finished session to the listener in a form, so there
+// is nothing left to redeem.
+#[tokio::test]
+async fn login_with_saml_takes_the_session_euclid_posts_to_the_listener() {
+    let server = MockServer::start().await;
+    let return_to = Arc::new(Mutex::new(String::new()));
+    let seen = return_to.clone();
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "saml-authorize"))
+        .respond_with(move |request: &Request| {
+            *seen.lock().unwrap() = body_of(request)["returnTo"].as_str().unwrap_or_default().to_owned();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "authenticationUrl": "https://idp.example.com/sso?SAMLRequest=x",
+                "relayState": "rs"
+            }))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("credentials");
+
+    let target = return_to.clone();
+    let session = Eam::for_server(server.uri())
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .browser(move |url| {
+            assert!(url.starts_with("https://idp.example.com/sso"));
+            // What EAM's hand-off page submits: the login response, base64url-encoded, unpadded.
+            let encoded = URL_SAFE_NO_PAD.encode(federated_login_body().to_string());
+            let target = target.lock().unwrap().clone();
+            tokio::spawn(async move {
+                let _ = reqwest::Client::new()
+                    .post(target)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(format!("session={encoded}"))
+                    .send()
+                    .await;
+            });
+        })
+        .login_with_saml()
+        .await
+        .unwrap();
+
+    assert!(return_to.lock().unwrap().starts_with("http://127.0.0.1:"));
+    assert_eq!(session.token(), "fed-token");
+    assert_eq!(session.account_id(), Some("863459426936"));
+    assert!(std::fs::read_to_string(&cache).unwrap().contains("fed-token"));
+}
+
+#[tokio::test]
+async fn login_with_saml_refuses_a_hand_off_without_a_token() {
+    let server = MockServer::start().await;
+    let return_to = Arc::new(Mutex::new(String::new()));
+    let seen = return_to.clone();
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "saml-authorize"))
+        .respond_with(move |request: &Request| {
+            *seen.lock().unwrap() = body_of(request)["returnTo"].as_str().unwrap_or_default().to_owned();
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "authenticationUrl": "https://idp/sso", "relayState": "rs" }))
+        })
+        .mount(&server)
+        .await;
+
+    let err = Eam::for_server(server.uri())
+        .no_cache()
+        .no_ca_cert()
+        .browser(move |_| {
+            let encoded = URL_SAFE_NO_PAD.encode(r#"{"metadata":{}}"#);
+            let target = return_to.lock().unwrap().clone();
+            tokio::spawn(async move {
+                let _ = reqwest::Client::new()
+                    .post(target)
+                    .body(format!("session={encoded}"))
+                    .send()
+                    .await;
+            });
+        })
+        .login_with_saml()
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::Authentication { status: 401, body } if body.contains("did not contain a token")),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn login_with_saml_assertion_hands_the_assertion_to_the_consumer_service() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-target", "eam"))
+        .and(header("x-euclid-action", "saml-acs"))
+        .and(body_json(json!({ "samlResponse": "PHNhbWw+", "relayState": "" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(federated_login_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let session = Eam::for_server(server.uri())
+        .no_cache()
+        .no_ca_cert()
+        .login_with_saml_assertion(&SamlAcsRequest {
+            saml_response: "PHNhbWw+".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(session.token(), "fed-token");
+}
+
+#[tokio::test]
+async fn login_with_saml_assertion_surfaces_a_refused_assertion() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "saml-acs"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(r#"{"error":"Unsolicited logins are not enabled"}"#))
+        .mount(&server)
+        .await;
+
+    let err = Eam::for_server(server.uri())
+        .no_cache()
+        .no_ca_cert()
+        .login_with_saml_assertion(&SamlAcsRequest {
+            saml_response: "x".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::Authentication { status: 401, .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn federated_building_blocks_speak_the_wire_format() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "oidc-authorize"))
+        .and(body_json(
+            json!({ "redirectUri": "", "returnTo": "https://app.example.com/" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authorizationUrl": "https://idp.example.com/authorize?state=st",
+            "state": "st"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "saml-authorize"))
+        .and(body_json(json!({ "returnTo": "" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authenticationUrl": "https://idp.example.com/sso",
+            "relayState": "rs"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let eam = Eam::for_server(server.uri()).no_cache().no_ca_cert();
+
+    let oidc = eam
+        .oidc_authorize(&OidcAuthorizeRequest {
+            return_to: "https://app.example.com/".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(oidc.state.as_deref(), Some("st"));
+    assert_eq!(
+        oidc.authorization_url.as_deref(),
+        Some("https://idp.example.com/authorize?state=st")
+    );
+
+    let saml = eam.saml_authorize(&SamlAuthorizeRequest::default()).await.unwrap();
+    assert_eq!(saml.relay_state.as_deref(), Some("rs"));
+    assert_eq!(saml.authentication_url.as_deref(), Some("https://idp.example.com/sso"));
+}
+
+// Going through the browser again within the hour is exactly what the cache is for.
+#[tokio::test]
+async fn federated_login_reuses_a_still_valid_cached_session() {
+    let server = MockServer::start().await;
+    let token = jwt(3600);
+    mount_login(&server, &token, 1).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "oidc-authorize"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("credentials");
+    Eam::for_server(server.uri())
+        .credentials("jens", "secret")
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap();
+
+    let session = Eam::for_server(server.uri())
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .browser(|_| panic!("the browser must not be needed"))
+        .login_with_oidc()
+        .await
+        .unwrap();
+
+    assert_eq!(session.token(), token);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Refreshing
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn refresh_session_leaves_somebody_elses_cached_session_alone() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "refresh-session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(login_body(&jwt(7200))))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("credentials");
+    let mut session = Eam::for_server(server.uri())
+        .credentials("jens", "secret")
+        .credentials_file(&cache)
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap();
+    let theirs = json!({ "token": "theirs", "userId": "dave", "baseUrl": server.uri() }).to_string();
+    std::fs::write(&cache, &theirs).unwrap();
+
+    session.refresh_session().await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(&cache).unwrap(), theirs);
+}
+
+#[tokio::test]
+async fn refresh_session_surfaces_an_expired_token() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "refresh-session"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(r#"{"error":"Bearer token expired"}"#))
+        .mount(&server)
+        .await;
+    let mut session = login_without_cache(&server).await;
+
+    let err = session.refresh_session().await.unwrap_err();
+
+    assert!(
+        matches!(&err, Error::Service { action, status: 401, .. } if action == "refresh-session"),
+        "{err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Match types, and the fields added alongside them
+// ---------------------------------------------------------------------------------------------
+
+async fn login_without_cache(server: &MockServer) -> euclid_rdk::Session {
+    Eam::for_server(server.uri())
+        .credentials("jens", "secret")
+        .no_cache()
+        .no_ca_cert()
+        .login()
+        .await
+        .unwrap()
+}
+
+// Absent is "prefix" server-side, so a listing that names no match type keeps meaning what it did.
+#[tokio::test]
+async fn listings_without_a_match_type_leave_it_out() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "list-users"))
+        .and(|request: &Request| body_of(request).get("matchType").is_none())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "users": [], "total": 0 })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let session = login_without_cache(&server).await;
+
+    session.list_users(&ListUsersRequest::default()).await.unwrap();
+}
+
+#[tokio::test]
+async fn every_listing_carries_the_match_type_it_was_given() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    for (action, expected) in [
+        ("list-users", json!({ "prefix": "ob", "matchType": "endsWith" })),
+        ("list-user-groups", json!({ "prefix": "ops", "matchType": "contains" })),
+        ("list-accounts", json!({ "prefix": "^86", "matchType": "regex" })),
+        (
+            "list-namespaces",
+            json!({ "accountId": "863459426936", "prefix": "pro", "matchType": "prefix", "pageSize": 0 }),
+        ),
+        ("list-roles", json!({ "prefix": "read", "matchType": "contains" })),
+    ] {
+        Mock::given(method("POST"))
+            .and(header("x-euclid-action", action))
+            .and(body_partial_json(expected))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "total": 0 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let session = login_without_cache(&server).await;
+
+    session
+        .list_users(&ListUsersRequest {
+            prefix: "ob".into(),
+            match_type: Some(MatchType::EndsWith),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    session
+        .list_user_groups(&ListUserGroupsRequest {
+            prefix: "ops".into(),
+            match_type: Some(MatchType::Contains),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    session
+        .list_accounts(&ListAccountsRequest {
+            prefix: "^86".into(),
+            match_type: Some(MatchType::Regex),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    session
+        .list_namespaces(&ListNamespacesRequest {
+            account_id: "863459426936".into(),
+            prefix: "pro".into(),
+            match_type: Some(MatchType::Prefix),
+            page_size: 0,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    session
+        .list_roles(&ListRolesRequest {
+            prefix: "read".into(),
+            match_type: Some(MatchType::Contains),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_match_type_the_server_cannot_use_is_surfaced() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "list-users"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(r#"{"error":"Invalid regular expression"}"#))
+        .mount(&server)
+        .await;
+    let session = login_without_cache(&server).await;
+
+    let err = session
+        .list_users(&ListUsersRequest {
+            prefix: "(".into(),
+            match_type: Some(MatchType::Regex),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::Service { action, status: 400, .. } if action == "list-users"),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn register_returns_the_user_as_stored() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "register"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "user": { "userId": "bob", "ern": "ern:eam::863459426936:user/bob", "password": "" },
+            "metadata": { "region": "eu-central-1", "accountId": "863459426936", "user": "jens" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let session = login_without_cache(&server).await;
+
+    let response = session
+        .register(&RegisterRequest {
+            user_id: "bob".into(),
+            password: "s3cret".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.user.user_id.as_deref(), Some("bob"));
+    assert_eq!(
+        response.user.ern.as_deref(),
+        Some("ern:eam::863459426936:user/bob"),
+        "the ERN is built server-side and only known from here"
+    );
+    assert_eq!(response.metadata.unwrap().user.as_deref(), Some("jens"));
+}
+
+#[tokio::test]
+async fn describe_permissions_keeps_the_modules_a_list_of_names_drops() {
+    let server = MockServer::start().await;
+    mount_login(&server, &jwt(3600), 1).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "list-permissions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "permissions": ["eqs:send-message", "ens:publish-message"],
+            "modules": ["ens", "eqs"],
+            "unbindableModules": ["emd", "emm"],
+            "metadata": {}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let session = login_without_cache(&server).await;
+
+    let response = session.describe_permissions().await.unwrap();
+
+    assert_eq!(response.permissions, ["eqs:send-message", "ens:publish-message"]);
+    assert_eq!(response.modules, ["ens", "eqs"]);
+    assert_eq!(response.unbindable_modules, ["emd", "emm"]);
 }

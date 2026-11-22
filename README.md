@@ -12,7 +12,8 @@ Async, built on `reqwest`; use it from any Tokio runtime. Requires Rust 1.88+.
 Status: **EAM** (access management), **EQS** (queues), **ENS** (pub/sub topics), **ESM** (object
 storage), **EKV** (key-value tables), **ESS** (secrets), **EKM** (keys and certificates), **ETS**
 (transfer servers), **EAG** (API gateway), **EAP** (application platform), **EMO** (metrics),
-**EES** (events, incl. a WebSocket stream), **EAD** (audit trail) and **EMM** (module manager) are
+**EES** (events, incl. a WebSocket stream), **EAD** (audit trail), **EDS** (domain name service)
+and **EMM** (module manager) are
 implemented - every module euclid-jdk has.
 
 ## Installation
@@ -70,12 +71,34 @@ If `/usr/local/euclid/etc/euclid_cert.crt` (euclid-cli's default) or `/etc/eucli
 exists, it is trusted automatically;
 `no_ca_cert()` opts out.
 
+An installation that federates its logins to an OpenID Connect or SAML 2.0 identity provider is
+signed into through a browser, as `euclid-cli eam login --oidc` / `--saml` do. A listener is bound on a
+loopback port (`http://127.0.0.1:<port>/callback`) for the browser to come back to; the session is
+cached like any other, and a still-valid cached one is reused without the browser:
+
+```rust
+let session = Eam::for_server(url)
+    .browser(|url| println!("Sign in at {url}"))   // default: print and open the system browser
+    .callback_timeout(Duration::from_secs(300))    // default: three minutes
+    .login_with_oidc()                             // or .login_with_saml()
+    .await?;
+```
+
+`oidc_authorize` / `oidc_login` and `saml_authorize` are the building blocks for a caller that runs
+the browser leg itself; `login_with_saml_assertion` hands a SAML response obtained elsewhere (e.g.
+from OneLogin's API) to the assertion consumer service.
+
 ### EAM operations
 
 ```rust
 use euclid_rdk::eam::*;
 
 let users = session.list_users(&ListUsersRequest { prefix: "j".into(), ..Default::default() }).await?;
+let ops = session.list_user_groups(&ListUserGroupsRequest {
+    prefix: "ops".into(),
+    match_type: Some(MatchType::Contains),   // or EndsWith, Regex; unset matches as a prefix
+    ..Default::default()
+}).await?;
 let user = session.get_user("bob").await?;
 session.change_password("old", "new").await?;
 
@@ -93,10 +116,12 @@ let check = session.check_permission(&CheckPermissionRequest {
 }).await?;
 ```
 
-Also available: `register`, `delete_user`, `reset_password`, `change_namespace`, `logout`,
+Also available: `register` (returns the stored user, ERN included), `delete_user`, `reset_password`,
+`change_namespace`, `switch_account`, `refresh_session`, `logout`,
 access keys (`create_access_key`, `list_access_keys`, `delete_access_key`), user groups, accounts,
 namespaces, roles (`create_role`, `update_role`, `get_role`, `list_roles`, `delete_role`),
-`list_grants` and `list_permissions`.
+`list_grants`, `list_permissions` and `describe_permissions` (the permissions plus the modules they
+come from, and those that are never grantable).
 
 Anything not wrapped yet can be called directly:
 
@@ -135,6 +160,14 @@ and trusts a zero only for 10 s (`zero_count_trust`). Also: `list_queues`, `get_
 `redrive_dlq`, tags, message attributes and `update_message_body`. Queue names resolve within the
 session's namespace; an ERN always works.
 
+`ListQueuesRequest::match_type` says how `prefix` is matched (`MatchType::Prefix`, the default
+when unset, `EndsWith`, `Contains` or `Regex`); a bad regex is a 400. A service in the
+middle of a chain hands the received `Message::system_attributes` on in
+`SendMessageRequest::system_attributes`, so a correlation id identifies the whole chain.
+`delete_queue_if_empty` refuses (409) a queue that still holds messages or has deliveries on their
+way into it. `purge_queue_with(ern, true)` answers 202 at once with the messages there were when
+the purge was accepted - for a backlog too large to empty within the gateway's timeout.
+
 ### ENS topics
 
 ```rust
@@ -158,6 +191,12 @@ and `start_topic` releases the backlog. Also: `list_messages`/`get_message`/`get
 so subscribers must be idempotent), tags, `set_topic_max_message_length`, `purge_topic`, and
 `list_subscriptions`/`unsubscribe`.
 
+`ListTopicsRequest::match_type` says how `prefix` is matched (`MatchType::Prefix`, the default
+when unset, `EndsWith`, `Contains` or `Regex`); the text is taken literally for all but `Regex`,
+and a bad regex is a 400. `purge_topic_with(ern, true)` answers 202 at once with the
+messages the topic held when the purge was taken on. `Topic::send`/`resend` are lifetime totals
+that, unlike `messages`, do not fall on a purge.
+
 ### ESM object storage
 
 ```rust
@@ -175,7 +214,24 @@ esm.upload_file(&bucket, "big.iso", "/tmp/big.iso", &TransferOptions::default())
 esm.download_file(&bucket, "big.iso", "/tmp/copy.iso", &TransferOptions::default()).await?;
 
 let objects = esm.list_objects(&ListObjectsRequest { bucket_ern: bucket.clone(), ..Default::default() }).await?;
+
+// One level of the bucket, like a directory listing: the objects directly in "in/" and the
+// directories one step below it in `common_prefixes`.
+let level = esm.list_objects(&ListObjectsRequest {
+    bucket_ern: bucket.clone(), prefix: "in/".into(), delimiter: Some("/".into()), ..Default::default()
+}).await?;
+
+// Tidy up only if nothing is left: a bucket with objects in it is a 409, not emptied.
+esm.delete_objects_by_prefix(&bucket, "tmp/", false, true).await?;   // notify = false deletes silently
+esm.delete_bucket_if_empty(&bucket).await?;
 ```
+
+Listings of buckets and objects match `prefix` literally from the start by default;
+`match_type: Some(MatchType::EndsWith | Contains | Regex)` matches it otherwise, and
+`ListBucketsRequest::include_internal` lists euclid's internal buckets too (administrators only).
+`create_bucket_with(&CreateBucketRequest { internal: true, .. })` creates a bucket hidden from the
+start. `delete_objects` with no keys sends nothing - to the server that would mean the whole bucket.
+`set_bucket_versioning`/`set_bucket_max_versions` cap the non-current versions kept per key.
 
 Also available: bucket tags, priority, stop/start, encryption, rename/purge,
 `copy_object`/`move_object`/`rename_object`, object attributes (`Variant`), subscriptions
@@ -205,8 +261,13 @@ Items and keys are plain JSON objects, so a `json!` value or any `Serialize` str
 server's `_created`/`_modified` attributes come back as `Item::created`/`Item::modified`. Key types
 default to `string`; `create_table_with(&CreateTableRequest { .. })` sets `KeyType::Number` or
 `KeyType::Binary`. `query_with(&QueryRequest { .. })` adds `SortOperator::Between` (with
-`sort_upper`), descending order (`forward: false`) and paging. Also: `list_tables`, `get_table`,
-`exists_table`, `delete_item` and `delete_table`. A missing item is a 404 `Error::Service`.
+`sort_upper`), descending order (`forward: false`) and paging; its `total` counts every match
+across pages. `scan_with(&ScanRequest { .. })` orders by `pk`/`sk`/`modified` and narrows by a
+`modified_from`/`modified_to` window or by `attribute_name`/`attribute_operator`/`attribute_value`
+on any attribute - the scan's `total` still counts the whole table, so page until a short page.
+`list_tables` matches names with `match_type: Some(MatchType::EndsWith | Contains | Regex)` as well
+as by prefix. Also: `get_table`, `exists_table`, `delete_item` and `delete_table`. A missing item
+is a 404 `Error::Service`.
 
 ### ESS secrets
 
@@ -227,7 +288,9 @@ Secrets are encrypted under the namespace's EKM key unless `create_secret_with` 
 (`key_ern`). In `update_secret` only the fields that are `Some` change; `Some("")` clears a
 description, `None` leaves it alone. Listings never carry values, and `Debug` output of anything
 holding a value prints `<redacted>`. Also: `list_secrets`, `exists_secret`, `delete_secret` and
-`add_secret_tag`/`delete_secret_tag`.
+`add_secret_tag`/`delete_secret_tag`. `ListSecretsRequest::match_type` says how `prefix` is matched
+(`MatchType::Prefix`, the default when unset, `EndsWith`, `Contains` or `Regex`); a bad regex is
+a 400.
 
 ### EKM keys and certificates
 
@@ -252,7 +315,9 @@ its ERN. `delete_key` only schedules deletion: the key stays `PENDING_DELETION` 
 (`create_certificate_with` for CN, SANs, validity, key size) or imported with their private key
 (`import_certificate`, redacted in `Debug`); only the public PEM comes back. Also: `list_keys`,
 `exists_key`, `add_key_tag`/`delete_key_tag`, `list_certificates`, `get_certificate`,
-`delete_certificate`.
+`delete_certificate`. `ListKeysRequest`/`ListCertificatesRequest` carry a `match_type`
+(`MatchType::Prefix`, the default when unset, `EndsWith`, `Contains` or `Regex`); a bad regex is
+a 400.
 
 ### ETS transfer servers
 
@@ -274,8 +339,11 @@ ets.start_server("inbound").await?;           // records intent; `state` follows
 A transfer server is an FTP or SFTP listener in front of an ESM bucket: clients log in with their
 EAM credentials and every upload becomes an object. It is created stopped; `start_server` and
 `stop_server` set `desired_state`, and the server's reconciler brings `state` in line.
-`update_server` sends only the fields that are set. Also: `list_servers`, `get_server`,
-`delete_server`. An unknown bucket is a 404, a port already in use a 409.
+`update_server` sends only the fields that are set. `TransferServer::user_count` is how many
+people may log in (the union of `user_ids` and the groups' members). `list_servers` covers the
+session's namespace; `list_servers_with(&ListServersRequest { .. })` adds a `match_type`
+(a `MatchType`). Also: `get_server`, `delete_server`. An
+unknown bucket is a 404, a port already in use a 409.
 
 ### EAG API gateway
 
@@ -291,11 +359,15 @@ let listeners = eag.list_listeners().await?;
 ```
 
 The API gateway publishes plain HTTP paths to the outside world and forwards them to an
-application or to one euclid module action. `update_route(&RouteRequest { .. })` changes only the
-fields given, and the same struct with `create_route_with` sets methods, namespace,
-`RouteAuthentication` and `active`. `list_routes(prefix)` covers the session's namespace;
-`list_listeners` reports what is configured and, through `serving`, whether anything is bound.
-Also: `get_route`, `delete_route`.
+application or to one euclid module action - or, for an upload route
+(`create_upload_route(id, path, bucket_ern, auth)`, `RouteType::Upload`), streams the request body
+into an ESM bucket itself. `update_route(&RouteRequest { .. })` changes only the fields given, and
+the same struct with `create_route_with` sets methods, namespace, `RouteAuthentication`, `active`,
+a per-route backend `timeout` and an upload route's key prefix, size limit, part size and content
+types. `list_routes(prefix)` covers the session's namespace; `list_routes_with(&ListRoutesRequest
+{ .. })` adds a `match_type` (a `MatchType`). `list_listeners`
+reports what is configured and, through `serving`, whether anything is bound. Also: `get_route`,
+`delete_route`.
 
 ### EAP applications
 
@@ -314,13 +386,21 @@ let nodes = eap.list_nodes().await?;
 
 An application is an artifact in an ESM bucket that euclid runs as a pool of processes. Every
 name is resolved at deployment (404 for a missing bucket, artifact or resource, 409 for a taken
-id). `update_application` changes only the fields that are `Some`. Also: `copy_application`
-(promote to another namespace), `scale_application`, `redeploy_application`,
-`restart_application`/`rebalance_application`, log levels, infrastructure and platform
-declarations (`plan_*` changes nothing), and nodes. Environment values print as `<redacted>` in
-`Debug`. `EgressLimiter` makes an application's calls to outside sites wait for a permit from
-EAP, shared by all its instances - `limiter.run("api.example.com", fetch()).await?` - timing out
-with an `EgressTimeout`, and falling back to local pacing if EAP cannot be asked.
+id). Grants cover `buckets`, `queues`, `topics` and `secrets`; `memory_limit_mb`/`cpu_limit` cap
+each instance. `create_application` applies the artifact's infrastructure declaration too and
+reports it in `Application::infrastructure` - a declaration that failed does not fail the
+deployment, so check its `error`. `update_application` changes only the fields that are `Some`
+(including `namespace` to move the application and `user` to change its identity); setting any
+of the four resource lists replaces all of them. `redeploy_application` refuses a build
+byte-for-byte identical to the deployed one unless `force: Some(true)`. `list_applications_with`
+takes a `match_type` (a `MatchType`). Also: `copy_application`
+(promote to another namespace), `scale_application`, `restart_application`/`rebalance_application`,
+log levels, infrastructure and platform declarations (`plan_*` changes nothing), and nodes -
+`drain_node`/`set_node_drained` and `assign_instance` to move a slot by hand. Environment values
+print as `<redacted>` in `Debug`. `EgressLimiter` makes an application's calls to outside sites
+wait for a permit from EAP, shared by all its instances - `limiter.run("api.example.com",
+fetch()).await?` - timing out with an `EgressTimeout`, and falling back to local pacing if EAP
+cannot be asked; permits report the `limits` they were decided under.
 
 ### EMO metrics
 
@@ -347,6 +427,27 @@ Counters become `rate`s carrying the step's count, gauges keep their level, and 
 published as `.count`/`.total` (rates) and `.max` (gauge), which survive EMO's rollups. Time units
 described as seconds are published in milliseconds. A failed scheduled push is logged (`log`) and
 dropped rather than retried.
+
+Reading the rows back and alerting on them read the whole installation and need an administrator;
+the caller's own saved dashboards need only authentication:
+
+```rust
+let rows = emo.list(&MetricQuery {                 // newest first, 100 unless `limit` says otherwise
+    resolution: Some(Resolution::Hour),
+    from: Some("2026-11-06T00:00:00Z".into()),
+    ..MetricQuery::named("system-load-per-core")
+}).await?;
+let mean = emo.average(&MetricQuery::named("system-load-per-core")).await?;  // sample-weighted
+
+emo.save_dashboard("ops", &serde_json::json!({ "panels": [] })).await?;     // any JSON object
+let layout = emo.get_dashboard("ops").await?.dashboard;
+let names = emo.list_dashboards().await?.items;                              // names and times only
+emo.delete_dashboard("ops").await?;
+```
+
+Unset query filters are left out so the server applies its defaults (every metric, `RAW`, no time
+bounds). `average` honours the labels but ignores `limit`, and answers 0 both for no matching rows
+and for an installation without MongoDB.
 
 ### EES events
 
@@ -396,6 +497,25 @@ let removed = ead.purge_events(90).await?;    // entries older than 90 days
 Every read is confined to the caller's own account. `list_events` counts its `total` only up to
 100 000 - `total_exact: false` means "at least this many"; `count_events` gives the real number.
 `purge_events(0)` is refused with 400 rather than empty the trail.
+
+### EDS domain name service
+
+```rust
+use euclid_rdk::eds::*;
+
+let eds = session.eds();                      // or Euclid::for_server(url).eds().await?
+eds.create_zone(&CreateZoneRequest::new("corp.example")).await?;   // gets SOA + NS on its own
+eds.put_record(&PutRecordRequest::new("corp.example", "www", "A", ["10.0.0.5", "10.0.0.6"])).await?;
+eds.put_record(&PutRecordRequest { ttl: 300, ..PutRecordRequest::new("corp.example", "@", "MX", ["10 mail.corp.example"]) }).await?;
+let records = eds.list_records(&ListRecordsRequest::new("corp.example")).await?;
+let answer = eds.get_answer("www.corp.example", None).await?;      // None = A; rcode NOERROR/NXDOMAIN/REFUSED
+eds.delete_record("corp.example", Some("www"), "A").await?;
+let removed = eds.delete_zone("corp.example").await?;               // record sets deleted with it
+```
+
+`put_record` replaces every record of one type at one name in one step. Zone names are unique
+across the installation; another account's zone answers 404, like a missing one. `get_answer`
+shows what the DNS port (UDP/TCP 1053 by default) would answer, without needing a DNS client.
 
 ### EMM module manager
 

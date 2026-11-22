@@ -4,6 +4,10 @@
 //! plain HTTP paths to the outside world and forwards them to applications or to single euclid
 //! module actions. These operations manage what it publishes; every one of them decides what is
 //! exposed and on what terms, so a non-admin session gets 403 from all of them.
+//!
+//! An [upload route](RouteType::Upload) forwards nowhere: the gateway is the endpoint, and it
+//! streams the request body into a bucket in parts without ever holding it whole. It names a
+//! bucket instead of an application or a module, and has to require a credential.
 
 pub mod model;
 
@@ -42,11 +46,12 @@ impl Eag {
         .await
     }
 
-    /// Publishes `path` as an upload endpoint: a request body sent there is stored as an object in
-    /// the ESM bucket `bucket_ern`. An upload route has to require authentication -
-    /// [`RouteAuthentication::Euclid`] or [`RouteAuthentication::Basic`]; `None` is refused with
-    /// 400. Use [`create_route_with`](Self::create_route_with) for a key prefix, size limit or
-    /// content types.
+    /// Publishes `path` as an upload endpoint: a request body sent there is streamed into the ESM
+    /// bucket `bucket_ern` (which has to exist) under the key given by the rest of the path. An
+    /// upload route has to require authentication - [`RouteAuthentication::Euclid`] or
+    /// [`RouteAuthentication::Basic`]; `None` is refused with 400. Key prefix, size limit, part
+    /// size and content types are left to their defaults (the whole bucket, no limit, 5 MiB,
+    /// anything); use [`create_route_with`](Self::create_route_with) to set them.
     pub async fn create_upload_route(
         &self,
         route_id: &str,
@@ -108,8 +113,20 @@ impl Eag {
     /// Lists the routes of this session's account and namespace whose path starts with
     /// `path_prefix` (empty for all).
     pub async fn list_routes(&self, path_prefix: &str) -> Result<Vec<Route>> {
+        self.list_routes_with(&ListRoutesRequest {
+            prefix: path_prefix.into(),
+            match_type: None,
+        })
+        .await
+    }
+
+    /// Lists the routes whose path matches the request's search text the way it asks - as a
+    /// prefix, a suffix, a substring or a regular expression: "every route ending in `/export`",
+    /// say. An unknown match type or a regular expression that does not compile is refused with
+    /// 400.
+    pub async fn list_routes_with(&self, request: &ListRoutesRequest) -> Result<Vec<Route>> {
         self.client
-            .call_field::<Option<Vec<Route>>>("list-routes", &json!({ "prefix": path_prefix }), "routes")
+            .call_field::<Option<Vec<Route>>>("list-routes", request, "routes")
             .await
             .map(Option::unwrap_or_default)
     }

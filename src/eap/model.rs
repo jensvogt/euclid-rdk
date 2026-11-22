@@ -4,6 +4,7 @@
 //! as euclid-jdk's non-null mapper does - on an update that means "keep the current value".
 //! Responses default every field, so one the server leaves out reads as `None`/zero/empty.
 
+use crate::MatchType;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -55,6 +56,14 @@ fn lenient_f64<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
         Some(Value::String(s)) => s.trim().parse().unwrap_or(0.0),
         _ => 0.0,
     })
+}
+
+/// Reads an embedded infrastructure report: `None` unless the field is a JSON object.
+fn lenient_infrastructure<'de, D: Deserializer<'de>>(d: D) -> Result<Option<ApplyInfrastructureResponse>, D::Error> {
+    match Option::<Value>::deserialize(d)? {
+        Some(v @ Value::Object(_)) => serde_json::from_value(v).map(Some).map_err(serde::de::Error::custom),
+        _ => Ok(None),
+    }
 }
 
 fn lenient_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
@@ -174,6 +183,8 @@ pub struct Application {
     pub account_id: Option<String>,
     pub namespace: Option<String>,
     pub region: Option<String>,
+    /// How the artifact is executed: `"JAVA"`, `"JAVA21"`, `"JAVA25"`, `"PYTHON"`, `"NODEJS"`,
+    /// `"BINARY"` or `"RUST"`.
     pub runtime: Option<String>,
     pub bucket_ern: Option<String>,
     pub artifact_key: Option<String>,
@@ -226,6 +237,13 @@ pub struct Application {
     pub created: Option<String>,
     #[serde(deserialize_with = "lenient_string")]
     pub modified: Option<String>,
+    /// What applying the application's own infrastructure declaration did as part of the
+    /// deployment. Only [`create_application`](crate::Eap::create_application) answers with it -
+    /// `None` from every other action. A declaration that cannot be applied never fails a
+    /// deployment whose artifact is fine, so check [`ApplyInfrastructureResponse::error`] rather
+    /// than assuming a created application also got the resources it declared.
+    #[serde(deserialize_with = "lenient_infrastructure")]
+    pub infrastructure: Option<ApplyInfrastructureResponse>,
 }
 
 impl fmt::Debug for Application {
@@ -265,6 +283,7 @@ impl fmt::Debug for Application {
             .field("endpoints", &self.endpoints)
             .field("created", &self.created)
             .field("modified", &self.modified)
+            .field("infrastructure", &self.infrastructure)
             .finish()
     }
 }
@@ -273,13 +292,15 @@ impl fmt::Debug for Application {
 ///
 /// Everything named is resolved at once: a bucket, artifact, granted resource or user that does
 /// not exist is a 404; an application id already used in the account and namespace is a 409.
-/// Leaving `user` unset lets EAP mint a technical principal granted exactly `buckets` and
-/// `queues`. `Debug` output shows environment variable names only.
-#[derive(Clone, Default, PartialEq, Eq, Serialize)]
+/// Leaving `user` unset lets EAP mint a technical principal granted exactly `buckets`, `queues`,
+/// `topics` and `secrets`. `Debug` output shows environment variable names only.
+#[derive(Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateApplicationRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub application_id: Option<String>,
+    /// How the artifact is executed: `"JAVA"`, `"JAVA21"`, `"JAVA25"`, `"PYTHON"`, `"NODEJS"`,
+    /// `"BINARY"` or `"RUST"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Name of the ESM bucket the artifact is in.
@@ -303,6 +324,15 @@ pub struct CreateApplicationRequest {
     /// Names of EQS queues the application is granted access to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queues: Option<Vec<String>>,
+    /// Names of ENS topics the application is granted access to, resolved now in the namespace
+    /// deployed into: a topic that does not exist is a 404 here rather than a refused publish later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topics: Option<Vec<String>>,
+    /// Names of ESS secrets the application is granted access to. Resolved now, so a missing
+    /// secret is a deployment refused with 404 naming it rather than a crash in the application's
+    /// startup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<String>>,
     /// An existing user to run as (it needs an access key); usually left unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
@@ -312,6 +342,15 @@ pub struct CreateApplicationRequest {
     pub max_instances: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_timeout_ms: Option<u64>,
+    /// Memory each instance may use, in MiB: `0` for no limit, otherwise at least 64. The
+    /// account's nodes have to be able to hold `min_instances` instances at this limit, or the
+    /// deployment is refused with 409 - checked now, though the application is created stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_limit_mb: Option<u64>,
+    /// CPU each instance may use, in cores (e.g. `1.5`): `0` for no limit, otherwise at least
+    /// 0.01. Over it an instance is throttled, never stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_limit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_labels: Option<BTreeMap<String, String>>,
     /// `"PROCESS"` or `"JOB"` (see [`ApplicationType::wire_value`]).
@@ -335,10 +374,14 @@ impl fmt::Debug for CreateApplicationRequest {
             .field("environment", &RedactedOptEnv(&self.environment))
             .field("buckets", &self.buckets)
             .field("queues", &self.queues)
+            .field("topics", &self.topics)
+            .field("secrets", &self.secrets)
             .field("user", &self.user)
             .field("min_instances", &self.min_instances)
             .field("max_instances", &self.max_instances)
             .field("ready_timeout_ms", &self.ready_timeout_ms)
+            .field("memory_limit_mb", &self.memory_limit_mb)
+            .field("cpu_limit", &self.cpu_limit)
             .field("node_labels", &self.node_labels)
             .field("application_type", &self.application_type)
             .field("schedule", &self.schedule)
@@ -347,10 +390,15 @@ impl fmt::Debug for CreateApplicationRequest {
 }
 
 /// Body of `update-application`. Only fields that are `Some` change, and each replaces the stored
-/// value as a whole (a list is substituted, not appended to). Changing `buckets` or `queues` also
-/// rewrites the grants of an EAP-minted principal. `Debug` output shows environment variable
-/// names only.
-#[derive(Clone, Default, PartialEq, Eq, Serialize)]
+/// value as a whole (a list is substituted, not appended to). `Debug` output shows environment
+/// variable names only.
+///
+/// The four resource lists - `buckets`, `queues`, `topics` and `secrets` - are one setting, not
+/// four: setting *any* of them replaces the application's whole resource list with what the four
+/// together name, so a request setting only `buckets` takes away its queues, topics and secrets.
+/// Send all four together when changing one. Doing so also rewrites the grants of an EAP-minted
+/// principal (a user named at creation is the caller's to grant).
+#[derive(Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateApplicationRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -371,12 +419,39 @@ pub struct UpdateApplicationRequest {
     pub buckets: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queues: Option<Vec<String>>,
+    /// Names of ENS topics the application may reach, replacing the current grants (see above).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topics: Option<Vec<String>>,
+    /// Names of ESS secrets the application may reach, replacing the current grants (see above).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<String>>,
+    /// Moves the application to this namespace, `Some("")` for the account root - so empty and
+    /// `None` mean different things here. A move, not a copy: its row, ERN and the grants of an
+    /// EAP-minted principal follow it, and it stops running where it was. Refused with 409 if the
+    /// target already has an application of this name; use
+    /// [`copy_application`](crate::Eap::copy_application) to leave the original running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// An existing user with an access key for the application to run as instead - the way out
+    /// of a definition whose user was deleted (see [`Application::user_exists`]). A principal EAP
+    /// had minted is deleted with its grants. Cannot be emptied: `""` is refused with 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_instances: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_timeout_ms: Option<u64>,
+    /// Memory each instance may use, in MiB: `0` removes the limit, otherwise at least 64.
+    /// Through this request the change restarts the pool;
+    /// [`set_application_limits`](crate::Eap::set_application_limits) sets it without a restart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_limit_mb: Option<u64>,
+    /// CPU each instance may use, in cores: `0` removes the limit, otherwise at least 0.01.
+    /// Restarts the pool, as `memory_limit_mb` does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_limit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_labels: Option<BTreeMap<String, String>>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
@@ -397,9 +472,15 @@ impl fmt::Debug for UpdateApplicationRequest {
             .field("environment", &RedactedOptEnv(&self.environment))
             .field("buckets", &self.buckets)
             .field("queues", &self.queues)
+            .field("topics", &self.topics)
+            .field("secrets", &self.secrets)
+            .field("namespace", &self.namespace)
+            .field("user", &self.user)
             .field("min_instances", &self.min_instances)
             .field("max_instances", &self.max_instances)
             .field("ready_timeout_ms", &self.ready_timeout_ms)
+            .field("memory_limit_mb", &self.memory_limit_mb)
+            .field("cpu_limit", &self.cpu_limit)
             .field("node_labels", &self.node_labels)
             .field("application_type", &self.application_type)
             .field("schedule", &self.schedule)
@@ -455,17 +536,47 @@ pub struct SetApplicationLimitsRequest {
     pub cpu_limit: Option<f64>,
 }
 
-/// Body of `redeploy-application`: make a new build (already uploaded to the application's
-/// bucket) the deployed one. Refused unless both version and bytes differ from what is deployed.
+/// Body of `redeploy-application`: make a new build (already uploaded, and settled, in the
+/// application's bucket) the deployed one.
+///
+/// Refused with 409 when the artifact's bytes are the build already deployed - the artifact, not
+/// its version, decides, so the same version rebuilt goes through. `force` overrides that, and so
+/// does an artifact whose bytes are missing from storage. An artifact still being uploaded is
+/// also a 409; one not in the bucket is a 404.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RedeployApplicationRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub application_id: Option<String>,
+    /// Key of the artifact; the one the application already uses when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact: Option<String>,
+    /// Version this build is - recorded, not checked; read from the artifact's name when `None`
+    /// (and refused if the name carries none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// `Some(true)` deploys even an artifact that is byte for byte the build already deployed
+    /// (the server logs that it overrode). [`restart_application`](crate::Eap::restart_application)
+    /// is the better tool when nothing about the artifact needs fixing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+}
+
+/// Body of `list-applications`: the applications of the session's namespace whose id matches
+/// `prefix` the way `match_type` says.
+///
+/// Every match type but `"regex"` treats the text as a literal, so `"a.b"` does not also find
+/// `"aXb"`. An unknown match type, or a regular expression that does not compile, is refused
+/// with 400.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListApplicationsRequest {
+    /// The search text; empty lists every application. Only a prefix under the default match type.
+    pub prefix: String,
+    /// How `prefix` is matched; `None` is not sent and means [`MatchType::Prefix`], as every
+    /// listing did before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
 }
 
 /// Answer to `restart-application`.
@@ -547,6 +658,12 @@ pub struct ApplyInfrastructureResponse {
     pub granted: Vec<String>,
     #[serde(deserialize_with = "lenient_string_list")]
     pub revoked: Vec<String>,
+    /// Why the declaration could not be read or applied; `None` if it was. Only ever set on the
+    /// report embedded in [`Application::infrastructure`] by `create-application`, which never
+    /// refuses a deployment over its declaration: the infrastructure and platform actions refuse
+    /// with 400 instead.
+    #[serde(deserialize_with = "empty_as_none")]
+    pub error: Option<String>,
 }
 
 /// A platform: shared infrastructure declared once for a namespace.
@@ -583,7 +700,7 @@ pub struct NodeApplication {
 }
 
 /// A node applications run on.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Node {
     pub name: Option<String>,
@@ -602,6 +719,10 @@ pub struct Node {
     /// Memory in use at the node's last renewal, in MiB; `0` for a node that has not said.
     #[serde(deserialize_with = "lenient_u64")]
     pub memory_used_mb: u64,
+    /// One-minute load average from the node's last heartbeat. `0.0` both for an idle machine and
+    /// for a heartbeat that carried no reading - placement does not tell them apart either.
+    #[serde(deserialize_with = "lenient_f64")]
+    pub load_average: f64,
     pub version: Option<String>,
     pub os: Option<String>,
     pub arch: Option<String>,
@@ -617,10 +738,50 @@ pub struct Node {
 }
 
 /// Answer to `list-nodes`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ListNodesResponse {
     pub nodes: Vec<Node>,
     pub total: u64,
+}
+
+/// Answer to `drain-node`. Nothing has moved yet when this is answered: a drained node keeps
+/// running what it has and keeps renewing; it is only refused *new* assignments.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DrainNodeResponse {
+    pub node: Option<String>,
+    /// `true` if the node is now refused new assignments, `false` if it was put back into service.
+    #[serde(deserialize_with = "lenient_bool")]
+    pub drained: bool,
+}
+
+/// Body of `assign-instance`: give one instance slot of an application's pool to a worker node by
+/// hand. Slots are named the way the manager names them - by the pool (the application's
+/// [`runtime_name`](Application::runtime_name), not its id) and the instance id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignInstanceRequest {
+    /// The pool the slot belongs to - the application's runtime name. Required.
+    pub runtime_name: String,
+    /// The slot to assign, as an endpoint reports it. Required.
+    pub instance_id: String,
+    /// The registered, undrained node to give it to; empty takes the slot back to the manager's
+    /// own host, which is how an assignment is undone. Always sent.
+    pub node: String,
+}
+
+/// Answer to `assign-instance`: which slot went where, and until when the claim holds.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AssignInstanceResponse {
+    pub runtime_name: Option<String>,
+    pub instance_id: Option<String>,
+    /// The node it now belongs to; empty if it was taken back to the manager's own host.
+    pub node: Option<String>,
+    /// When the claim lapses unless the node renews it (ISO 8601); a node that does not renew in
+    /// time loses the slot to placement.
+    #[serde(deserialize_with = "lenient_string")]
+    pub lease_expires_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -678,10 +839,22 @@ pub struct EgressLimitResponse {
     pub limits: EgressLimits,
 }
 
+/// Reads embedded egress limits: `None` unless the field is a JSON object - all-zero limits would
+/// read as "nothing is allowed", which is not what an older EAP that sent none meant.
+fn optional_limits<'de, D: Deserializer<'de>>(d: D) -> Result<Option<EgressLimits>, D::Error> {
+    match Option::<Value>::deserialize(d)? {
+        Some(v @ Value::Object(_)) => serde_json::from_value(v).map(Some).map_err(serde::de::Error::custom),
+        _ => Ok(None),
+    }
+}
+
 /// Answer to `acquire-egress-permit`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct EgressPermitResponse {
+    /// The application the permit was asked for, as euclid resolved it.
+    pub application_id: Option<String>,
+    /// The site, as euclid stores it (lower-cased host).
     pub site: Option<String>,
     #[serde(deserialize_with = "lenient_bool")]
     pub granted: bool,
@@ -694,4 +867,23 @@ pub struct EgressPermitResponse {
     /// When to ask again, after a refusal.
     #[serde(deserialize_with = "lenient_u64")]
     pub retry_after_ms: u64,
+    /// The limits the decision was made under - the site's own, the application's `"*"` default,
+    /// or the installation's - sent with every answer, granted or not. `None` only from an EAP too
+    /// old to send them.
+    #[serde(deserialize_with = "optional_limits")]
+    pub limits: Option<EgressLimits>,
+}
+
+/// Answer to `report-egress-throttled`: until when every instance of the application now leaves
+/// the site alone. Worth reading rather than assuming `now + retry_after`: euclid caps one report
+/// at an hour, floors it at a second, and keeps a block that already ran longer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EgressThrottledResponse {
+    pub application_id: Option<String>,
+    /// The site, as euclid stores it (lower-cased host).
+    pub site: Option<String>,
+    /// Until when no permit for the site is granted (ISO 8601).
+    #[serde(deserialize_with = "empty_as_none")]
+    pub blocked_until: Option<String>,
 }

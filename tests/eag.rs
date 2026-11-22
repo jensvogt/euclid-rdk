@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use euclid_rdk::eag::{Protocol, RouteAuthentication, RouteRequest, RouteType, UploadSpec};
+use euclid_rdk::eag::{ListRoutesRequest, Protocol, RouteAuthentication, RouteRequest, RouteType, UploadSpec};
 use euclid_rdk::{Eag, Eam, Error};
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method};
@@ -346,8 +346,73 @@ async fn route_type_and_upload_default_when_an_older_server_leaves_them_out() {
     let server = MockServer::start().await;
     mount(&server, "get-route", route_json()).await;
     let route = eag(&server, true).await.get_route("produkte").await.unwrap();
-    assert_eq!(route.kind, RouteType::Unknown);
-    assert_eq!(route.timeout, 0);
+    // A route stored before uploads existed is a proxy route.
+    assert_eq!(route.kind, RouteType::Proxy);
+    assert!(!route.is_upload_route());
+    assert_eq!(route.timeout, 0, "no timeout means the gateway's default");
     assert_eq!(route.upload, UploadSpec::default());
     assert_eq!(RouteType::from_wire_value("proxy"), RouteType::Proxy);
+    assert_eq!(RouteType::from_wire_value(""), RouteType::Proxy);
+    // Present but unrecognized is not passed off as a proxy route.
+    assert_eq!(RouteType::from_wire_value("mirror"), RouteType::Unknown);
+}
+
+#[tokio::test]
+async fn an_upload_route_is_recognised() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "get-route",
+        json!({ "routeId": "deliveries", "type": "upload", "upload": { "bucket": "ern:esm:bucket/inbox" } }),
+    )
+    .await;
+    let route = eag(&server, true).await.get_route("deliveries").await.unwrap();
+    assert!(route.is_upload_route());
+    assert!(!route.is_module_route());
+    assert_eq!(route.upload.bucket.as_deref(), Some("ern:esm:bucket/inbox"));
+}
+
+#[tokio::test]
+async fn update_route_can_change_the_timeout_alone() {
+    let server = MockServer::start().await;
+    let mut answer = route_json();
+    answer["timeout"] = json!(300);
+    answer["type"] = json!("PROXY");
+    let seen = mount(&server, "update-route", answer).await;
+
+    let route = eag(&server, true)
+        .await
+        .update_route(&RouteRequest {
+            route_id: Some("produkte".into()),
+            timeout: Some(300),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // An unset type or bucket is left alone, so neither goes on the wire.
+    assert_eq!(last(&seen).0, json!({ "routeId": "produkte", "timeout": 300 }));
+    assert_eq!(route.timeout, 300);
+    assert_eq!(route.kind, RouteType::Proxy);
+    assert!(!route.is_upload_route());
+}
+
+#[tokio::test]
+async fn list_routes_sends_the_match_type_only_when_set() {
+    let server = MockServer::start().await;
+    let seen = mount(&server, "list-routes", json!({ "routes": [route_json()] })).await;
+    let eag = eag(&server, true).await;
+
+    let routes = eag
+        .list_routes_with(&ListRoutesRequest {
+            prefix: "/export".into(),
+            match_type: Some(euclid_rdk::MatchType::EndsWith),
+        })
+        .await
+        .unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(last(&seen).0, json!({ "prefix": "/export", "matchType": "endsWith" }));
+
+    // Without a match type the server's prefix default applies, so it stays off the wire.
+    eag.list_routes("/supp").await.unwrap();
+    assert_eq!(last(&seen).0, json!({ "prefix": "/supp" }));
 }

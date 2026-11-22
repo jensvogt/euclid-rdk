@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use euclid_rdk::ets::{CreateServerRequest, Protocol, UpdateServerRequest};
+use euclid_rdk::ets::{CreateServerRequest, ListServersRequest, Protocol, UpdateServerRequest};
 use euclid_rdk::{Eam, Error, Ets};
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method};
@@ -130,6 +130,35 @@ async fn list_servers_sends_prefix_and_parses_servers() {
     // A server with nothing set still parses.
     assert_eq!(all[1].port, 0);
     assert!(all[1].user_ids.is_empty());
+}
+
+// Every type but regex is matched literally server-side, so the match type has to travel with the
+// text - and without one the server's prefix default applies, so it stays off the wire rather than
+// arriving as an empty string.
+#[tokio::test]
+async fn list_servers_sends_the_match_type_only_when_set() {
+    let server = MockServer::start().await;
+    let ets = ets(&server, true).await;
+    let seen = mount(&server, "list-servers", json!({ "servers": [server_json()] })).await;
+
+    let found = ets
+        .list_servers_with(&ListServersRequest {
+            prefix: "inbound".into(),
+            match_type: Some(euclid_rdk::MatchType::Contains),
+        })
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    ets.list_servers_with_prefix("sftp").await.unwrap();
+
+    let bodies: Vec<Value> = seen.lock().unwrap().iter().map(|(b, _)| b.clone()).collect();
+    assert_eq!(
+        bodies,
+        [
+            json!({ "prefix": "inbound", "matchType": "contains" }),
+            json!({ "prefix": "sftp" }),
+        ]
+    );
 }
 
 #[tokio::test]

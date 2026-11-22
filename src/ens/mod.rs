@@ -45,6 +45,8 @@ impl Ens {
         self.client.call("create-topic", &body).await
     }
 
+    /// Lists topics, paginated. `total` counts every match under the same filter, not just this
+    /// page.
     pub async fn list_topics(&self, request: &ListTopicsRequest) -> Result<ListTopicsResponse> {
         self.client.call("list-topics", request).await
     }
@@ -80,9 +82,12 @@ impl Ens {
         self.client.call_unit("delete-topic", &json!({ "ern": ern })).await
     }
 
-    /// Deletes every message stored on the topic, keeping the topic.
+    /// Deletes every message stored on the topic, keeping the topic, and answers once they are
+    /// gone.
     pub async fn purge_topic(&self, ern: &str) -> Result<()> {
-        self.client.call_unit("purge-topic", &json!({ "ern": ern })).await
+        self.client
+            .call_unit("purge-topic", &json!({ "ern": ern, "async": false }))
+            .await
     }
 
     /// Purges a topic, optionally asynchronously. With `run_async` the server answers 202 as soon
@@ -90,9 +95,22 @@ impl Ens {
     /// the background - for a topic too large to empty within the gateway's timeout. Nothing is
     /// resumed: a purge interrupted halfway has removed part of the topic, and asking again removes
     /// the rest.
+    ///
+    /// An older server answered with an empty body, and one that does still means the purge is
+    /// done - so an empty or non-object answer reads as a finished, inline purge of the topic
+    /// asked for rather than as an error.
     pub async fn purge_topic_with(&self, ern: &str, run_async: bool) -> Result<PurgeTopicResponse> {
         let body = json!({ "ern": ern, "async": run_async });
-        self.client.call("purge-topic", &body).await
+        let value = self.client.call_value("purge-topic", &body).await?;
+        let mut answer: PurgeTopicResponse = if value.is_object() {
+            serde_json::from_value(value)?
+        } else {
+            PurgeTopicResponse::default()
+        };
+        if answer.ern.is_none() {
+            answer.ern = Some(ern.to_owned());
+        }
+        Ok(answer)
     }
 
     /// Purges every topic of the session's own account and region.

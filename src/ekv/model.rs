@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 
 pub use crate::eam::SortDirection;
 use crate::serde_util::{lenient_string, lenient_u64};
+pub use crate::MatchType;
 
 const CREATED_ATTRIBUTE: &str = "_created";
 const MODIFIED_ATTRIBUTE: &str = "_modified";
@@ -125,11 +126,17 @@ pub struct CreateTableRequest {
     pub sort_key_type: KeyType,
 }
 
-/// Paging and sorting for `list-tables`.
+/// Paging, sorting and filtering for `list-tables`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTablesRequest {
+    /// The text table names are matched against; empty matches every one.
     pub prefix: String,
+    /// How `prefix` is matched; `None` (not sent) for a plain prefix match, which is what every
+    /// listing did before the field existed. An unknown type or a regex that does not compile is
+    /// refused with HTTP 400 rather than quietly matching nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -140,6 +147,7 @@ impl Default for ListTablesRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
@@ -246,8 +254,9 @@ pub struct QueryResponse {
     pub items: Vec<Item>,
     /// Items returned; the server's figure, or the number of items when it sends none.
     pub count: u64,
-    /// Items matching the query across all pages - what tells a caller paging through a partition
-    /// that there is a page after this one. Falls back to `count` from a server that sends none.
+    /// Items matching the query across all pages - what the same partition and sort-key condition
+    /// take, not the whole table - which tells a caller paging through a partition that there is
+    /// a page after this one. Falls back to `count` from a server that sends none.
     pub total: u64,
 }
 
@@ -302,7 +311,9 @@ pub struct ScanResponse {
     pub items: Vec<Item>,
     /// Items on this page.
     pub count: u64,
-    /// Items in the whole table.
+    /// Items in the whole table - regardless of any narrowing a [`ScanRequest`] asked for. A
+    /// caller paging through a narrowed scan cannot work out the number of pages from it, and
+    /// stops when a page comes back shorter than it asked for.
     pub total: u64,
 }
 
