@@ -109,11 +109,19 @@ pub struct CreateKeyResponse {
     pub status: Option<String>,
 }
 
-/// Paging and sorting for `list-keys` and `list-certificates`.
+/// Paging, sorting and filtering for `list-keys` and `list-certificates`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListRequest {
+    /// Only keys or certificates whose name matches this text, the way `match_type` says; empty matches every
+    /// one.
     pub prefix: String,
+    /// How `prefix` is matched against each name: `"prefix"` - also what an empty value, the
+    /// default, means, and what every listing did before the field existed - `"endsWith"`,
+    /// `"contains"` or `"regex"`. Every type but `"regex"` treats the text as a literal, so `"a.b"`
+    /// does not also find `"aXb"`. An unknown type, or a regex that does not compile, is refused
+    /// with HTTP 400 rather than quietly matching nothing.
+    pub match_type: String,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -124,6 +132,7 @@ impl Default for ListRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: String::new(),
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
@@ -132,9 +141,9 @@ impl Default for ListRequest {
     }
 }
 
-/// Paging and sorting for `list-keys`.
+/// Paging, sorting and filtering for `list-keys`.
 pub type ListKeysRequest = ListRequest;
-/// Paging and sorting for `list-certificates`.
+/// Paging, sorting and filtering for `list-certificates`.
 pub type ListCertificatesRequest = ListRequest;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

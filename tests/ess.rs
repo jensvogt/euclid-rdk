@@ -176,7 +176,8 @@ async fn list_and_exists() {
     let listing = ess.list_secrets(&ListSecretsRequest::default()).await.unwrap();
     assert_eq!(
         body(&seen),
-        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name", "sortDirection": "asc" })
+        json!({ "prefix": "", "matchType": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
+                "sortDirection": "asc" })
     );
     assert_eq!(listing.total, 1);
     assert_eq!(listing.secrets.len(), 1);
@@ -184,6 +185,8 @@ async fn list_and_exists() {
     assert!(ess.exists_secret("db-password").await.unwrap());
     assert_eq!(body(&seen)["prefix"], "db-password");
     assert_eq!(body(&seen)["pageSize"], 0);
+    // exists_secret stays a prefix match: an empty matchType is what the server reads as one.
+    assert_eq!(body(&seen)["matchType"], "");
     // A prefix match is not an exact match.
     assert!(!ess.exists_secret("db-pass").await.unwrap());
 }
@@ -256,4 +259,31 @@ async fn debug_output_redacts_secret_values() {
         ..Default::default()
     };
     assert!(!format!("{update:?}").contains("s3cr3t"));
+}
+
+#[tokio::test]
+async fn list_secrets_sends_the_match_type() {
+    let server = MockServer::start().await;
+    let ess = ess(&server, true).await;
+    let seen = mount(
+        &server,
+        "list-secrets",
+        json!({ "secrets": [secret_json()], "total": 1 }),
+    )
+    .await;
+
+    let listing = ess
+        .list_secrets(&ListSecretsRequest {
+            prefix: "password".into(),
+            match_type: "contains".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let sent = body(&seen);
+    assert_eq!(sent["prefix"], "password");
+    assert_eq!(sent["matchType"], "contains");
+    assert_eq!(sent["pageSize"], 10);
+    assert_eq!(sent["sortColumn"], "name");
+    assert_eq!(listing.total, 1);
 }

@@ -134,11 +134,19 @@ impl fmt::Debug for GetSecretResponse {
     }
 }
 
-/// Paging and sorting for `list-secrets`.
+/// Paging, sorting and filtering for `list-secrets`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListSecretsRequest {
+    /// Only secrets whose name matches this text, the way `match_type` says; empty matches every
+    /// one.
     pub prefix: String,
+    /// How `prefix` is matched against each name: `"prefix"` - also what an empty value, the
+    /// default, means, and what every listing did before the field existed - `"endsWith"`,
+    /// `"contains"` or `"regex"`. Every type but `"regex"` treats the text as a literal, so `"a.b"`
+    /// does not also find `"aXb"`. An unknown type, or a regex that does not compile, is refused
+    /// with HTTP 400 rather than quietly matching nothing.
+    pub match_type: String,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -149,6 +157,7 @@ impl Default for ListSecretsRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: String::new(),
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),

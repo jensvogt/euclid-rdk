@@ -242,7 +242,9 @@ Secrets are encrypted under the namespace's EKM key unless `create_secret_with` 
 (`key_ern`). In `update_secret` only the fields that are `Some` change; `Some("")` clears a
 description, `None` leaves it alone. Listings never carry values, and `Debug` output of anything
 holding a value prints `<redacted>`. Also: `list_secrets`, `exists_secret`, `delete_secret` and
-`add_secret_tag`/`delete_secret_tag`.
+`add_secret_tag`/`delete_secret_tag`. `ListSecretsRequest::match_type` says how `prefix` is matched
+(`"prefix"`, the default when empty, `"endsWith"`, `"contains"` or `"regex"`); an unknown type or
+a bad regex is a 400.
 
 ### EKM keys and certificates
 
@@ -267,7 +269,9 @@ its ERN. `delete_key` only schedules deletion: the key stays `PENDING_DELETION` 
 (`create_certificate_with` for CN, SANs, validity, key size) or imported with their private key
 (`import_certificate`, redacted in `Debug`); only the public PEM comes back. Also: `list_keys`,
 `exists_key`, `add_key_tag`/`delete_key_tag`, `list_certificates`, `get_certificate`,
-`delete_certificate`.
+`delete_certificate`. `ListKeysRequest`/`ListCertificatesRequest` carry a `match_type` (`"prefix"`,
+the default when empty, `"endsWith"`, `"contains"` or `"regex"`); an unknown type or a bad regex
+is a 400.
 
 ### ETS transfer servers
 
