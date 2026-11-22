@@ -275,8 +275,11 @@ ets.start_server("inbound").await?;           // records intent; `state` follows
 A transfer server is an FTP or SFTP listener in front of an ESM bucket: clients log in with their
 EAM credentials and every upload becomes an object. It is created stopped; `start_server` and
 `stop_server` set `desired_state`, and the server's reconciler brings `state` in line.
-`update_server` sends only the fields that are set. Also: `list_servers`, `get_server`,
-`delete_server`. An unknown bucket is a 404, a port already in use a 409.
+`update_server` sends only the fields that are set. `TransferServer::user_count` is how many
+people may log in (the union of `user_ids` and the groups' members). `list_servers` covers the
+session's namespace; `list_servers_with(&ListServersRequest { .. })` adds a `match_type`
+(`"prefix"`, `"endsWith"`, `"contains"`, `"regex"`). Also: `get_server`, `delete_server`. An
+unknown bucket is a 404, a port already in use a 409.
 
 ### EAG API gateway
 
