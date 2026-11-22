@@ -12,7 +12,8 @@ Async, built on `reqwest`; use it from any Tokio runtime. Requires Rust 1.88+.
 Status: **EAM** (access management), **EQS** (queues), **ENS** (pub/sub topics), **ESM** (object
 storage), **EKV** (key-value tables), **ESS** (secrets), **EKM** (keys and certificates), **ETS**
 (transfer servers), **EAG** (API gateway), **EAP** (application platform), **EMO** (metrics),
-**EES** (events, incl. a WebSocket stream), **EAD** (audit trail) and **EMM** (module manager) are
+**EES** (events, incl. a WebSocket stream), **EAD** (audit trail), **EDS** (domain name service)
+and **EMM** (module manager) are
 implemented - every module euclid-jdk has.
 
 ## Installation
@@ -396,6 +397,25 @@ let removed = ead.purge_events(90).await?;    // entries older than 90 days
 Every read is confined to the caller's own account. `list_events` counts its `total` only up to
 100 000 - `total_exact: false` means "at least this many"; `count_events` gives the real number.
 `purge_events(0)` is refused with 400 rather than empty the trail.
+
+### EDS domain name service
+
+```rust
+use euclid_rdk::eds::*;
+
+let eds = session.eds();                      // or Euclid::for_server(url).eds().await?
+eds.create_zone(&CreateZoneRequest::new("corp.example")).await?;   // gets SOA + NS on its own
+eds.put_record(&PutRecordRequest::new("corp.example", "www", "A", ["10.0.0.5", "10.0.0.6"])).await?;
+eds.put_record(&PutRecordRequest { ttl: 300, ..PutRecordRequest::new("corp.example", "@", "MX", ["10 mail.corp.example"]) }).await?;
+let records = eds.list_records(&ListRecordsRequest::new("corp.example")).await?;
+let answer = eds.get_answer("www.corp.example", None).await?;      // None = A; rcode NOERROR/NXDOMAIN/REFUSED
+eds.delete_record("corp.example", Some("www"), "A").await?;
+let removed = eds.delete_zone("corp.example").await?;               // record sets deleted with it
+```
+
+`put_record` replaces every record of one type at one name in one step. Zone names are unique
+across the installation; another account's zone answers 404, like a missing one. `get_answer`
+shows what the DNS port (UDP/TCP 1053 by default) would answer, without needing a DNS client.
 
 ### EMM module manager
 

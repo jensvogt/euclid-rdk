@@ -9,6 +9,7 @@ use crate::credentials::{self, CachedCredentials};
 use crate::ead::Ead;
 use crate::eag::Eag;
 use crate::eap::Eap;
+use crate::eds::Eds;
 use crate::ees::Ees;
 use crate::ekm::Ekm;
 use crate::ekv::Ekv;
@@ -221,6 +222,12 @@ impl Session {
     /// EAD (audit) operations for this session: the account's audit trail.
     pub fn ead(&self) -> Ead {
         Ead::new(self.service("ead"))
+    }
+
+    /// EDS (domain name service) operations for this session: hosted zones, their record sets,
+    /// and what the name server answers for a name.
+    pub fn eds(&self) -> Eds {
+        Eds::new(self.service("eds"))
     }
 
     /// EMM (module manager) operations for this session: module pools, backups, export and

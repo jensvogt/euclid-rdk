@@ -27,6 +27,7 @@ pub mod ead;
 pub mod eag;
 pub mod eam;
 pub mod eap;
+pub mod eds;
 pub mod ees;
 pub mod ekm;
 pub mod ekv;
@@ -47,6 +48,7 @@ pub use ead::Ead;
 pub use eag::Eag;
 pub use eam::{Eam, Session};
 pub use eap::Eap;
+pub use eds::Eds;
 pub use ees::Ees;
 pub use ekm::Ekm;
 pub use ekv::Ekv;
@@ -147,6 +149,11 @@ impl Euclid {
     /// EAD operations using the cached session for this server (see [`Euclid::session`]).
     pub async fn ead(&self) -> Result<Ead> {
         Ok(self.session().await?.ead())
+    }
+
+    /// EDS operations using the cached session for this server (see [`Euclid::session`]).
+    pub async fn eds(&self) -> Result<Eds> {
+        Ok(self.session().await?.eds())
     }
 
     /// EMM operations using the cached session for this server (see [`Euclid::session`]).
