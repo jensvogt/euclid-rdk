@@ -64,6 +64,9 @@ impl Eqs {
     // Queues
     // -----------------------------------------------------------------------------------------
 
+    /// Retrieves a page of queues. A match type the server does not know, or a regular expression
+    /// it cannot compile, is refused with HTTP 400. Asking for internal queues without being an
+    /// administrator is not refused - they are simply left out.
     pub async fn list_queues(&self, request: &ListQueuesRequest) -> Result<ListQueuesResponse> {
         self.client.call("list-queues", request).await
     }
@@ -81,13 +84,19 @@ impl Eqs {
         self.client.call("create-queue", request).await
     }
 
+    /// Deletes the queue unconditionally, whatever it holds. See
+    /// [`delete_queue_if_empty`](Self::delete_queue_if_empty) to delete only an unused one.
     pub async fn delete_queue(&self, ern: &str) -> Result<()> {
-        self.client.call_unit("delete-queue", &json!({ "ern": ern })).await
+        self.client
+            .call_unit("delete-queue", &json!({ "ern": ern, "ifEmpty": false }))
+            .await
     }
 
     /// Deletes the queue only if nothing is using it: no message in it and no event still being
     /// delivered into it. Otherwise the server refuses with 409 ([`Error::Service`] with status
-    /// 409) and the queue stays; a missing queue is a 404.
+    /// 409) and the queue stays; it also refuses when it cannot establish whether deliveries are
+    /// pending. The messages themselves are counted, not the queue's counters, so a counter that
+    /// has drifted cannot decide this. A missing queue is a 404.
     pub async fn delete_queue_if_empty(&self, ern: &str) -> Result<()> {
         self.client
             .call_unit("delete-queue", &json!({ "ern": ern, "ifEmpty": true }))
@@ -123,7 +132,9 @@ impl Eqs {
 
     /// Removes every message from the queue.
     pub async fn purge_queue(&self, ern: &str) -> Result<()> {
-        self.client.call_unit("purge-queue", &json!({ "ern": ern })).await
+        self.client
+            .call_unit("purge-queue", &json!({ "ern": ern, "async": false }))
+            .await
     }
 
     /// Purges a queue, optionally asynchronously. With `run_async` the server answers 202 as soon
@@ -131,9 +142,21 @@ impl Eqs {
     /// queue in the background - for a backlog too large to remove within the gateway's timeout.
     /// Nothing is resumed: a purge interrupted halfway has removed part of the queue, and asking
     /// again removes the rest.
+    ///
+    /// A server from before `purge-queue` answered with a body answers with an empty one; that
+    /// purge was done inline by definition, and reads as such for the queue asked about.
     pub async fn purge_queue_with(&self, ern: &str, run_async: bool) -> Result<PurgeQueueResponse> {
         let body = json!({ "ern": ern, "async": run_async });
-        self.client.call("purge-queue", &body).await
+        let value = self.client.call_value("purge-queue", &body).await?;
+        let mut answer: PurgeQueueResponse = if value.is_object() {
+            serde_json::from_value(value)?
+        } else {
+            PurgeQueueResponse::default()
+        };
+        if answer.ern.is_none() {
+            answer.ern = Some(ern.to_owned());
+        }
+        Ok(answer)
     }
 
     /// Purges every queue of the session's own account and region.

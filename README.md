@@ -136,6 +136,14 @@ and trusts a zero only for 10 s (`zero_count_trust`). Also: `list_queues`, `get_
 `redrive_dlq`, tags, message attributes and `update_message_body`. Queue names resolve within the
 session's namespace; an ERN always works.
 
+`ListQueuesRequest::match_type` says how `prefix` is matched (`"prefix"`, the default when empty,
+`"endsWith"`, `"contains"` or `"regex"`); an unknown type or a bad regex is a 400. A service in the
+middle of a chain hands the received `Message::system_attributes` on in
+`SendMessageRequest::system_attributes`, so a correlation id identifies the whole chain.
+`delete_queue_if_empty` refuses (409) a queue that still holds messages or has deliveries on their
+way into it. `purge_queue_with(ern, true)` answers 202 at once with the messages there were when
+the purge was accepted - for a backlog too large to empty within the gateway's timeout.
+
 ### ENS topics
 
 ```rust
@@ -158,6 +166,12 @@ and `start_topic` releases the backlog. Also: `list_messages`/`get_message`/`get
 (read without consuming), message attributes, `update_message_body`, `resend_messages` (a replay,
 so subscribers must be idempotent), tags, `set_topic_max_message_length`, `purge_topic`, and
 `list_subscriptions`/`unsubscribe`.
+
+`ListTopicsRequest::match_type` says how `prefix` is matched (`"prefix"`, the default when empty,
+`"endsWith"`, `"contains"` or `"regex"`); the text is taken literally for all but `"regex"`, and an
+unknown type or a bad regex is a 400. `purge_topic_with(ern, true)` answers 202 at once with the
+messages the topic held when the purge was taken on. `Topic::send`/`resend` are lifetime totals
+that, unlike `messages`, do not fall on a purge.
 
 ### ESM object storage
 
@@ -228,7 +242,9 @@ Secrets are encrypted under the namespace's EKM key unless `create_secret_with` 
 (`key_ern`). In `update_secret` only the fields that are `Some` change; `Some("")` clears a
 description, `None` leaves it alone. Listings never carry values, and `Debug` output of anything
 holding a value prints `<redacted>`. Also: `list_secrets`, `exists_secret`, `delete_secret` and
-`add_secret_tag`/`delete_secret_tag`.
+`add_secret_tag`/`delete_secret_tag`. `ListSecretsRequest::match_type` says how `prefix` is matched
+(`"prefix"`, the default when empty, `"endsWith"`, `"contains"` or `"regex"`); an unknown type or
+a bad regex is a 400.
 
 ### EKM keys and certificates
 
@@ -253,7 +269,9 @@ its ERN. `delete_key` only schedules deletion: the key stays `PENDING_DELETION` 
 (`create_certificate_with` for CN, SANs, validity, key size) or imported with their private key
 (`import_certificate`, redacted in `Debug`); only the public PEM comes back. Also: `list_keys`,
 `exists_key`, `add_key_tag`/`delete_key_tag`, `list_certificates`, `get_certificate`,
-`delete_certificate`.
+`delete_certificate`. `ListKeysRequest`/`ListCertificatesRequest` carry a `match_type` (`"prefix"`,
+the default when empty, `"endsWith"`, `"contains"` or `"regex"`); an unknown type or a bad regex
+is a 400.
 
 ### ETS transfer servers
 

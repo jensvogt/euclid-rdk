@@ -100,7 +100,16 @@ impl Queue {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListQueuesRequest {
+    /// The text queue names are matched against, the way `match_type` says; empty matches every
+    /// queue.
     pub prefix: String,
+    /// How `prefix` is matched: `"prefix"`, `"endsWith"`, `"contains"` or `"regex"`. Empty, the
+    /// default, leaves it to the server, which reads it as `"prefix"`. Every type but `"regex"`
+    /// takes the text literally. Named by the server rather than by an enum, so a match type a
+    /// newer server adds can be asked for straight away; one the server does not know, or a
+    /// regular expression it cannot compile, is refused with HTTP 400 rather than quietly treated
+    /// as a prefix.
+    pub match_type: String,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -113,6 +122,7 @@ impl Default for ListQueuesRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: String::new(),
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
@@ -320,7 +330,14 @@ pub struct Message {
 pub struct SendMessageRequest {
     pub ern: String,
     pub body: String,
+    /// Typed, user-defined message attributes.
     pub attributes: HashMap<String, Variant>,
+    /// Euclid's own envelope - a correlation id most of all. For a service in the middle of a
+    /// chain: hand on the [`Message::system_attributes`] of the message being answered, or the
+    /// chain ends at this hop. They travel apart from `attributes` the whole way, so a consumer's
+    /// own attribute names never collide with them. A priority among them does not set this
+    /// message's priority; `priority` does.
+    pub system_attributes: HashMap<String, Variant>,
     /// `LOW`, `MEDIUM` or `HIGH`.
     pub priority: String,
 }
@@ -331,6 +348,7 @@ impl Default for SendMessageRequest {
             ern: String::new(),
             body: String::new(),
             attributes: HashMap::new(),
+            system_attributes: HashMap::new(),
             priority: medium(),
         }
     }

@@ -144,7 +144,7 @@ async fn list_queues_sends_defaults_and_parses_queues() {
     let response = eqs.list_queues(&ListQueuesRequest::default()).await.unwrap();
     assert_eq!(
         seen.lock().unwrap()[0],
-        json!({ "prefix": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
+        json!({ "prefix": "", "matchType": "", "pageSize": 10, "pageIndex": 0, "sortColumn": "name",
                 "sortDirection": "asc", "includeInternal": false })
     );
     assert_eq!(response.total, 1);
@@ -211,7 +211,8 @@ async fn send_message_with_attributes() {
     assert_eq!(sent.message_id.as_deref(), Some("m-1"));
     assert_eq!(
         seen.lock().unwrap()[0],
-        json!({ "ern": QUEUE, "body": "{\"hello\":1}", "attributes": {}, "priority": "MEDIUM" })
+        json!({ "ern": QUEUE, "body": "{\"hello\":1}", "attributes": {}, "systemAttributes": {},
+                "priority": "MEDIUM" })
     );
 
     let mut attributes = HashMap::new();
@@ -222,6 +223,7 @@ async fn send_message_with_attributes() {
         body: "x".into(),
         attributes,
         priority: "HIGH".into(),
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -529,4 +531,112 @@ async fn delete_queue_if_empty_refused_with_409() {
 
     let err = eqs.delete_queue_if_empty(QUEUE).await.unwrap_err();
     assert!(matches!(err, Error::Service { status: 409, .. }));
+}
+
+#[tokio::test]
+async fn delete_queue_without_if_empty_stays_unconditional() {
+    let server = MockServer::start().await;
+    let eqs = eqs(&server, true).await;
+    let delete = mount(&server, "delete-queue", json!({})).await;
+
+    eqs.delete_queue(QUEUE).await.unwrap();
+    assert_eq!(delete.lock().unwrap()[0], json!({ "ern": QUEUE, "ifEmpty": false }));
+}
+
+#[tokio::test]
+async fn purge_queue_inline_reads_an_empty_answer_as_done() {
+    // A server from before purge-queue answered with a body says nothing at all; that purge was
+    // inline by definition, and the queue asked about is the one it was.
+    let server = MockServer::start().await;
+    let eqs = eqs(&server, true).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "purge-queue"))
+        .and(body_json(json!({ "ern": QUEUE, "async": false })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let answer = eqs.purge_queue_with(QUEUE, false).await.unwrap();
+    assert_eq!(answer.ern.as_deref(), Some(QUEUE));
+    assert!(!answer.is_async);
+    assert_eq!(answer.messages, 0);
+
+    eqs.purge_queue(QUEUE).await.unwrap();
+}
+
+#[tokio::test]
+async fn purge_queue_async_is_answered_with_202() {
+    let server = MockServer::start().await;
+    let eqs = eqs(&server, true).await;
+    Mock::given(method("POST"))
+        .and(header("x-euclid-action", "purge-queue"))
+        .respond_with(
+            ResponseTemplate::new(202).set_body_json(json!({ "ern": QUEUE, "async": true, "messages": 796171 })),
+        )
+        .mount(&server)
+        .await;
+
+    let answer = eqs.purge_queue_with(QUEUE, true).await.unwrap();
+    assert_eq!(answer.ern.as_deref(), Some(QUEUE));
+    assert!(answer.is_async);
+    assert_eq!(answer.messages, 796171);
+}
+
+#[tokio::test]
+async fn list_queues_carries_the_match_type() {
+    let server = MockServer::start().await;
+    let eqs = eqs(&server, true).await;
+    let seen = mount(
+        &server,
+        "list-queues",
+        json!({ "queues": [{ "name": "orders-dlq", "ern": "q", "status": "STOPPED", "internal": true }],
+                "total": 1 }),
+    )
+    .await;
+
+    let response = eqs
+        .list_queues(&ListQueuesRequest {
+            prefix: "-dlq".into(),
+            match_type: "endsWith".into(),
+            include_internal: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let body = &seen.lock().unwrap()[0];
+    assert_eq!(body["prefix"], "-dlq");
+    assert_eq!(body["matchType"], "endsWith");
+    assert_eq!(body["includeInternal"], true);
+    let queue = &response.queues[0];
+    assert_eq!(queue.status.as_deref(), Some("STOPPED"));
+    assert!(queue.internal);
+}
+
+#[tokio::test]
+async fn send_message_carries_system_attributes_apart_from_the_callers_own() {
+    let server = MockServer::start().await;
+    let eqs = eqs(&server, true).await;
+    let seen = mount(&server, "send-message", json!({ "messageId": "m-2" })).await;
+
+    let response = eqs
+        .send_message_with(&SendMessageRequest {
+            ern: QUEUE.into(),
+            body: "hello".into(),
+            attributes: HashMap::from([("kind".to_owned(), Variant::string("reply"))]),
+            system_attributes: HashMap::from([("correlationId".to_owned(), Variant::string("corr-1"))]),
+            priority: "HIGH".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.message_id.as_deref(), Some("m-2"));
+    assert_eq!(
+        seen.lock().unwrap()[0],
+        json!({
+            "ern": QUEUE, "body": "hello",
+            "attributes": { "kind": { "type": "string", "value": "reply" } },
+            "systemAttributes": { "correlationId": { "type": "string", "value": "corr-1" } },
+            "priority": "HIGH"
+        })
+    );
 }
