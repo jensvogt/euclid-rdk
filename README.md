@@ -292,11 +292,15 @@ let listeners = eag.list_listeners().await?;
 ```
 
 The API gateway publishes plain HTTP paths to the outside world and forwards them to an
-application or to one euclid module action. `update_route(&RouteRequest { .. })` changes only the
-fields given, and the same struct with `create_route_with` sets methods, namespace,
-`RouteAuthentication` and `active`. `list_routes(prefix)` covers the session's namespace;
-`list_listeners` reports what is configured and, through `serving`, whether anything is bound.
-Also: `get_route`, `delete_route`.
+application or to one euclid module action - or, for an upload route
+(`create_upload_route(id, path, bucket_ern, auth)`, `RouteType::Upload`), streams the request body
+into an ESM bucket itself. `update_route(&RouteRequest { .. })` changes only the fields given, and
+the same struct with `create_route_with` sets methods, namespace, `RouteAuthentication`, `active`,
+a per-route backend `timeout` and an upload route's key prefix, size limit, part size and content
+types. `list_routes(prefix)` covers the session's namespace; `list_routes_with(&ListRoutesRequest
+{ .. })` adds a `match_type` (`"prefix"`, `"endsWith"`, `"contains"`, `"regex"`). `list_listeners`
+reports what is configured and, through `serving`, whether anything is bound. Also: `get_route`,
+`delete_route`.
 
 ### EAP applications
 
