@@ -57,6 +57,8 @@ pub struct LoginResponse {
 pub struct User {
     pub user_id: Option<String>,
     pub ern: Option<String>,
+    /// Always empty in what the server answers: the stored value is a password hash, and the
+    /// server never sends it back. Kept so the type mirrors the server's DTO field for field.
     pub password: Option<String>,
     pub email: Option<String>,
     pub account_id: Option<String>,
@@ -72,6 +74,10 @@ pub struct User {
 #[serde(rename_all = "camelCase")]
 pub struct ListUsersRequest {
     pub prefix: String,
+    /// How `prefix` is matched; `None` matches it as a prefix, as every listing did before the
+    /// choice existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -82,6 +88,7 @@ impl Default for ListUsersRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "userId".into(),
@@ -107,6 +114,15 @@ pub struct RegisterRequest {
     pub account_id: String,
     pub region: String,
     pub is_admin: bool,
+}
+
+/// Answer to `eam register`: the user as the server stored them - their ERN in particular, which
+/// is built server-side from the account and user ID rather than sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RegisterResponse {
+    pub metadata: Option<Metadata>,
+    pub user: User,
 }
 
 /// Body of `eam change-userid`. Both ids are always named: there is no "me" default.
@@ -182,6 +198,10 @@ pub struct UserGroup {
 #[serde(rename_all = "camelCase")]
 pub struct ListUserGroupsRequest {
     pub prefix: String,
+    /// How `prefix` is matched; `None` matches it as a prefix, as every listing did before the
+    /// choice existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -192,6 +212,7 @@ impl Default for ListUserGroupsRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
@@ -229,6 +250,10 @@ pub struct Account {
 #[serde(rename_all = "camelCase")]
 pub struct ListAccountsRequest {
     pub prefix: String,
+    /// How `prefix` is matched; `None` matches it as a prefix, as every listing did before the
+    /// choice existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -239,6 +264,7 @@ impl Default for ListAccountsRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "accountId".into(),
@@ -307,11 +333,19 @@ pub struct Namespace {
 
 /// Paging and sorting for `list-namespaces`. `account_id` names the account whose namespaces to
 /// list.
+///
+/// A `page_size` of zero returns every namespace the caller may see. The page is taken over what
+/// the caller may see rather than over the account, so a page is never short because of
+/// namespaces filtered out of it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListNamespacesRequest {
     pub account_id: String,
     pub prefix: String,
+    /// How `prefix` is matched; `None` matches it as a prefix, as every listing did before the
+    /// choice existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -323,6 +357,7 @@ impl Default for ListNamespacesRequest {
         Self {
             account_id: String::new(),
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
@@ -373,6 +408,10 @@ pub struct RoleRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ListRolesRequest {
     pub prefix: String,
+    /// How `prefix` is matched; `None` matches it as a prefix, as every listing did before the
+    /// choice existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<MatchType>,
     pub page_size: u64,
     pub page_index: u64,
     pub sort_column: String,
@@ -384,6 +423,7 @@ impl Default for ListRolesRequest {
     fn default() -> Self {
         Self {
             prefix: String::new(),
+            match_type: None,
             page_size: 10,
             page_index: 0,
             sort_column: "name".into(),
@@ -484,6 +524,24 @@ pub struct CheckPermissionRequest {
     pub resource_ern: String,
 }
 
+/// What `list-permissions` answers: every permission a role can hold, and the modules they come
+/// from.
+///
+/// Generated server-side from the modules' own dispatch tables, so it is exactly what can be
+/// granted. The modules that are not bindable at all contribute nothing to `permissions` and are
+/// named separately, so a caller can say why they are missing rather than wondering.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ListPermissionsResponse {
+    /// Every permission, sorted, as `<module>:<action>`.
+    pub permissions: Vec<String>,
+    /// The modules that have permissions, sorted - what a `<module>:*` permission may name.
+    pub modules: Vec<String>,
+    /// The modules whose actions can never be granted to anybody - today `emd` and `emm`. Only an
+    /// installation administrator reaches them.
+    pub unbindable_modules: Vec<String>,
+}
+
 /// Whether a request would be allowed, and which role decided it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -494,8 +552,141 @@ pub struct PermissionCheckResponse {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Federated login (OIDC, SAML)
+// ---------------------------------------------------------------------------------------------
+
+/// Body of `oidc-authorize`: asks EAM to start an OpenID Connect login and say where to send the
+/// browser.
+///
+/// Nothing in here identifies anybody: the identity provider decides who is signing in, which is
+/// the point of federating the login. What this says is only where the two legs of the flow should
+/// end up. Both fields default to empty - the server's configured callback, and no browser
+/// hand-off.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcAuthorizeRequest {
+    /// Where the provider should send the browser back to with the authorization code, or empty
+    /// for the one the server has configured (`oidc.redirect-uri`). A native client names its own
+    /// loopback listener here - see [`Eam::login_with_oidc`](super::Eam::login_with_oidc) - and the
+    /// provider must accept it, usually as a wildcard loopback URI. Whatever is used is sealed into
+    /// the state and presented again when the code is redeemed, since the provider requires the
+    /// two to match.
+    pub redirect_uri: String,
+    /// Where the server should send the browser once the login has succeeded, for a flow that ends
+    /// in a browser rather than in a caller collecting the response; empty means the caller redeems
+    /// the code itself with `oidc-login`. Only destinations the server permits
+    /// (`oidc.return-to-prefixes`) are accepted, because the token travels in that redirect's
+    /// fragment.
+    pub return_to: String,
+}
+
+/// Answer to `oidc-authorize`: where to send the person to authenticate, and the state that
+/// belongs to that particular attempt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OidcAuthorizeResponse {
+    /// The provider's authorization endpoint with every parameter already on it. Open it in a
+    /// browser; nothing else needs to be added.
+    pub authorization_url: Option<String>,
+    /// The opaque state this attempt travels under, also present in `authorization_url`. Returned
+    /// separately so a caller can check that the callback it receives belongs to the authorization
+    /// it started. It carries the flow's nonce and PKCE verifier, sealed by the server - there is
+    /// nothing in it to read, and it is the flow's only memory, so the `oidc-login` that redeems
+    /// the code has to present it unchanged.
+    pub state: Option<String>,
+}
+
+/// Body of `oidc-login`: hands EAM what came back from the OpenID Connect provider, to be turned
+/// into a euclid session.
+///
+/// Answered with the same [`LoginResponse`] a password login produces, because from there on a
+/// federated session is not a different kind of session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcLoginRequest {
+    /// The authorization code from the provider's callback.
+    pub code: String,
+    /// The state from the provider's callback, exactly as it arrived. Not merely checked against
+    /// the one that was issued: it *is* the flow's memory - the nonce and the PKCE verifier are
+    /// sealed inside it - so a callback without it cannot be completed by any server instance, and
+    /// one that has been altered is refused.
+    pub state: String,
+}
+
+/// Body of `saml-authorize`: asks EAM to start a SAML 2.0 login and say where to send the browser.
+///
+/// Unlike [`OidcAuthorizeRequest`] there is no redirect URI: the identity provider posts its
+/// assertion to the server's own assertion consumer service, which is registered with the provider
+/// once, and only afterwards does the server hand the finished session on. So nothing about the
+/// caller ever has to be registered with the provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SamlAuthorizeRequest {
+    /// Where the server should deliver the session once the assertion has been accepted, or empty
+    /// to have the assertion consumer answer with the login response itself. A loopback address
+    /// (`http://127.0.0.1:<port>/...`) is a native client waiting on its own port and gets the
+    /// session in a self-submitting form post, so the token never sits in a URL; anywhere else is
+    /// a front end and gets it in the redirect's fragment. Only destinations the server permits
+    /// (`saml.return-to-prefixes`) are accepted.
+    pub return_to: String,
+}
+
+/// Answer to `saml-authorize`: where to send the person to authenticate with the SAML identity
+/// provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SamlAuthorizeResponse {
+    /// The provider's single sign-on URL, with the deflated, encoded AuthnRequest and the
+    /// RelayState already on it. Open it in a browser; nothing else needs to be added.
+    pub authentication_url: Option<String>,
+    /// The opaque RelayState this attempt travels under, also present in `authentication_url`.
+    /// Returned separately so a caller can tell whether what comes back belongs to the login it
+    /// started. It carries the request ID the assertion has to answer, sealed - there is nothing in
+    /// it to read.
+    pub relay_state: Option<String>,
+}
+
+/// Body of `saml-acs`: a signed SAML response, handed to EAM's assertion consumer service as JSON.
+///
+/// The browser binding delivers the same two values as an HTML form post, straight from the
+/// identity provider; this is the shape for a program that obtained the assertion some other way -
+/// from the provider's API, as `euclid-cli eam login --onelogin` does - and wants it turned into a
+/// session. Either way it is verified identically: the provider's signature is what is trusted,
+/// not how the assertion arrived.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SamlAcsRequest {
+    /// The base64-encoded SAML response, as the provider issued it.
+    pub saml_response: String,
+    /// The RelayState that came with it, or empty for an assertion that answers no login request
+    /// euclid made. Such an unsolicited assertion is refused unless the server allows IdP-initiated
+    /// logins (`saml.allow-idp-initiated`).
+    pub relay_state: String,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Misc
 // ---------------------------------------------------------------------------------------------
+
+/// How a listing's `prefix` is matched against the names it lists.
+///
+/// Every type but [`Regex`](Self::Regex) takes the text literally, so a search for `a.b` does not
+/// also find `aXb`; a pattern the server cannot use is refused with HTTP 400. Leaving the match
+/// type unset (`None`) means [`Prefix`](Self::Prefix), which is what every listing did before the
+/// choice existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MatchType {
+    /// Names starting with the text.
+    #[default]
+    Prefix,
+    /// Names ending with the text.
+    EndsWith,
+    /// Names containing the text anywhere.
+    Contains,
+    /// Names matching the text as a regular expression.
+    Regex,
+}
 
 /// Sort order of a listing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

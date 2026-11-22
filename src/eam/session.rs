@@ -287,7 +287,11 @@ impl Session {
     /// Renews this session before its token runs out: the server hands back a fresh token (and the
     /// same access key), and this session adopts it. The account and namespace in use are kept.
     /// An expired token cannot be renewed - log in again instead. Module clients obtained before
-    /// the refresh keep presenting the old token. The credentials cache is updated.
+    /// the refresh keep presenting the old token.
+    ///
+    /// The cached copy in the credentials file is replaced too, but only when it holds this same
+    /// user's session on this same server - a refresh does not take over a cache that belongs to
+    /// somebody else, and a session that was never cached has no copy to keep current.
     pub async fn refresh_session(&mut self) -> Result<()> {
         let login: LoginResponse = self.eam("refresh-session", &json!({})).await?;
         let Some(token) = login.token.filter(|t| !t.is_empty()) else {
@@ -320,12 +324,15 @@ impl Session {
         Ok(())
     }
 
-    /// Rewrites the credentials cache from this session, if what is cached is for this server.
-    /// Best-effort, like the namespace update: a cache that cannot be written means the next
-    /// process logs in again, not that the call failed.
+    /// Rewrites the credentials cache from this session, if what is cached is this same user's
+    /// session on this same server. The file is shared with euclid-cli and every other session, so
+    /// a process that logged in as one user while somebody else's session sits in the cache must
+    /// not silently swap who the next command runs as. Best-effort, like the namespace update: a
+    /// cache that cannot be written means the next process logs in again, not that the call failed.
     fn sync_cache(&self) {
         let Some(path) = &self.credentials_path else { return };
-        if credentials::load(path).and_then(|c| c.base_url).as_deref() == Some(self.base_url.as_str()) {
+        let Some(cached) = credentials::load(path) else { return };
+        if cached.base_url.as_deref() == Some(self.base_url.as_str()) && cached.user_id == self.creds.user_id {
             let _ = credentials::store(path, &self.to_cached());
         }
     }
@@ -345,6 +352,8 @@ impl Session {
     // Users
     // -----------------------------------------------------------------------------------------
 
+    /// Lists users, filtered by `request.prefix` as `request.match_type` says. Requires
+    /// administrator privileges; the server refuses a match type or pattern it cannot use with 400.
     pub async fn list_users(&self, request: &ListUsersRequest) -> Result<ListUsersResponse> {
         self.eam("list-users", request).await
     }
@@ -354,8 +363,12 @@ impl Session {
     }
 
     /// Creates a user. Requires administrator privileges.
-    pub async fn register(&self, request: &RegisterRequest) -> Result<()> {
-        self.eam_unit("register", request).await
+    ///
+    /// Returns the user as the server stored them - their ERN in particular, which is built
+    /// server-side from the account and user ID rather than sent. The server refuses with 400 (user
+    /// ID or password missing), 403 or 409 (the user ID is taken).
+    pub async fn register(&self, request: &RegisterRequest) -> Result<RegisterResponse> {
+        self.eam("register", request).await
     }
 
     pub async fn delete_user(&self, user_id: &str) -> Result<()> {
@@ -456,6 +469,11 @@ impl Session {
         .await
     }
 
+    /// Lists user groups, filtered by `request.prefix` as `request.match_type` says.
+    ///
+    /// Not administrator-only: the server gates this on the `eam:list-user-groups` permission like
+    /// any other action, so an application whose role carries it may list groups - which is what
+    /// one resolving its own callers' group memberships needs.
     pub async fn list_user_groups(&self, request: &ListUserGroupsRequest) -> Result<ListUserGroupsResponse> {
         self.eam("list-user-groups", request).await
     }
@@ -470,13 +488,22 @@ impl Session {
         self.eam_field("get-user-group", &body, "userGroup").await
     }
 
-    /// Adds a user (ERN) to a user group (ERN).
+    /// Adds a user to a user group. Requires administrator privileges.
+    ///
+    /// Both may be given either way they are spelled elsewhere: the group by name or by ERN, the
+    /// user by user ID or by ERN. A value starting with `ern:` is taken as an ERN - a name cannot
+    /// begin that way without being one. The server refuses with 404 if either does not exist, and
+    /// 409 if the user is already a member.
     pub async fn add_user_to_user_group(&self, user_group: &str, user: &str) -> Result<()> {
         self.eam_unit("user-group-add-user", &json!({ "userGroup": user_group, "user": user }))
             .await
     }
 
-    /// Removes a user (ERN) from a user group (ERN).
+    /// Removes a user from a user group. Requires administrator privileges.
+    ///
+    /// Accepts the same spellings [`add_user_to_user_group`](Self::add_user_to_user_group) does.
+    /// Removing a user who is not a member is not an error - the group simply ends up without them,
+    /// which is what was asked for. The server refuses with 404 if either does not exist.
     pub async fn remove_user_from_user_group(&self, user_group: &str, user: &str) -> Result<()> {
         self.eam_unit(
             "user-group-remove-user",
@@ -509,6 +536,9 @@ impl Session {
         self.eam_field("get-account", &body, "account").await
     }
 
+    /// Lists accounts, filtered by `request.prefix` as `request.match_type` says. Requires
+    /// administrator privileges; [`list_my_accounts`](Self::list_my_accounts) is the listing
+    /// anybody may ask for.
     pub async fn list_accounts(&self, request: &ListAccountsRequest) -> Result<ListAccountsResponse> {
         self.eam("list-accounts", request).await
     }
@@ -535,6 +565,13 @@ impl Session {
         self.eam_field("create-namespace", &body, "namespace").await
     }
 
+    /// Lists the namespaces of `request.account_id` (required), filtered by `request.prefix` as
+    /// `request.match_type` says.
+    ///
+    /// What comes back is what this session's user may work in, not everything the account holds:
+    /// an account administrator sees every namespace, anybody else only those a grant of theirs or
+    /// of one of their groups names (or all of them, for a grant scoped to `*`). `total` counts the
+    /// same visible set, so it stays an honest guide to paging.
     pub async fn list_namespaces(&self, request: &ListNamespacesRequest) -> Result<ListNamespacesResponse> {
         self.eam("list-namespaces", request).await
     }
@@ -576,6 +613,17 @@ impl Session {
             .map(Option::unwrap_or_default)
     }
 
+    /// The whole answer `list-permissions` gives: every permission, and the modules they come
+    /// from - including the ones that are never grantable, named rather than silently missing.
+    ///
+    /// [`list_permissions`](Self::list_permissions) is the permission names alone, which is what
+    /// validating a role needs. This is for a caller that has to explain the vocabulary as well -
+    /// offering a `<module>:*` permission per module, or saying why `emm` has no entries. Readable
+    /// by anybody logged in: it is the vocabulary, not anybody's access.
+    pub async fn describe_permissions(&self) -> Result<ListPermissionsResponse> {
+        self.eam("list-permissions", &json!({})).await
+    }
+
     pub async fn create_role(&self, request: &RoleRequest) -> Result<Role> {
         self.eam_field("create-role", request, "role").await
     }
@@ -588,6 +636,7 @@ impl Session {
         self.eam_field("get-role", &json!({ "name": name }), "role").await
     }
 
+    /// Lists the account's roles, filtered by `request.prefix` as `request.match_type` says.
     pub async fn list_roles(&self, request: &ListRolesRequest) -> Result<ListRolesResponse> {
         self.eam("list-roles", request).await
     }
