@@ -71,12 +71,34 @@ If `/usr/local/euclid/etc/euclid_cert.crt` (euclid-cli's default) or `/etc/eucli
 exists, it is trusted automatically;
 `no_ca_cert()` opts out.
 
+An installation that federates its logins to an OpenID Connect or SAML 2.0 identity provider is
+signed into through a browser, as `euclid-cli eam login --oidc` / `--saml` do. A listener is bound on a
+loopback port (`http://127.0.0.1:<port>/callback`) for the browser to come back to; the session is
+cached like any other, and a still-valid cached one is reused without the browser:
+
+```rust
+let session = Eam::for_server(url)
+    .browser(|url| println!("Sign in at {url}"))   // default: print and open the system browser
+    .callback_timeout(Duration::from_secs(300))    // default: three minutes
+    .login_with_oidc()                             // or .login_with_saml()
+    .await?;
+```
+
+`oidc_authorize` / `oidc_login` and `saml_authorize` are the building blocks for a caller that runs
+the browser leg itself; `login_with_saml_assertion` hands a SAML response obtained elsewhere (e.g.
+from OneLogin's API) to the assertion consumer service.
+
 ### EAM operations
 
 ```rust
 use euclid_rdk::eam::*;
 
 let users = session.list_users(&ListUsersRequest { prefix: "j".into(), ..Default::default() }).await?;
+let ops = session.list_user_groups(&ListUserGroupsRequest {
+    prefix: "ops".into(),
+    match_type: Some(MatchType::Contains),   // or EndsWith, Regex; unset matches as a prefix
+    ..Default::default()
+}).await?;
 let user = session.get_user("bob").await?;
 session.change_password("old", "new").await?;
 
@@ -94,10 +116,12 @@ let check = session.check_permission(&CheckPermissionRequest {
 }).await?;
 ```
 
-Also available: `register`, `delete_user`, `reset_password`, `change_namespace`, `logout`,
+Also available: `register` (returns the stored user, ERN included), `delete_user`, `reset_password`,
+`change_namespace`, `switch_account`, `refresh_session`, `logout`,
 access keys (`create_access_key`, `list_access_keys`, `delete_access_key`), user groups, accounts,
 namespaces, roles (`create_role`, `update_role`, `get_role`, `list_roles`, `delete_role`),
-`list_grants` and `list_permissions`.
+`list_grants`, `list_permissions` and `describe_permissions` (the permissions plus the modules they
+come from, and those that are never grantable).
 
 Anything not wrapped yet can be called directly:
 
